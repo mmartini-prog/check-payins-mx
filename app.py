@@ -6,36 +6,13 @@ from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
 
 st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide")
 
-# ─────────────────────────────────────────────────────────────
-# STYLE DLOCAL
-# ─────────────────────────────────────────────────────────────
-
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #05051a;
-        color: #ffffff;
-    }
-
-    .block-container {
-        padding-top: 2rem;
-        padding-left: 2.5rem;
-        padding-right: 2.5rem;
-    }
-
-    section[data-testid="stSidebar"] {
-        background-color: #07071f;
-        border-right: 1px solid #1a1aff;
-    }
-
-    h1, h2, h3 {
-        color: #ffffff !important;
-        font-weight: 800 !important;
-    }
-
-    p, label, span, div {
-        color: #c8d4ff;
-    }
+    .stApp { background-color: #05051a; color: #ffffff; }
+    .block-container { padding-top: 2rem; padding-left: 2.5rem; padding-right: 2.5rem; }
+    section[data-testid="stSidebar"] { background-color: #07071f; border-right: 1px solid #1a1aff; }
+    h1, h2, h3 { color: #ffffff !important; font-weight: 800 !important; }
+    p, label, span, div { color: #c8d4ff; }
 
     div[data-testid="metric-container"] {
         background: linear-gradient(135deg, #0a0a2e, #101050);
@@ -45,24 +22,10 @@ st.markdown("""
         box-shadow: 0 0 18px rgba(26, 26, 255, 0.25);
     }
 
-    div[data-testid="metric-container"] label {
-        color: #a0b4ff !important;
-    }
+    div[data-testid="metric-container"] label { color: #a0b4ff !important; }
+    div[data-testid="metric-container"] div { color: #ffffff !important; }
 
-    div[data-testid="metric-container"] div {
-        color: #ffffff !important;
-    }
-
-    .stButton button {
-        background: linear-gradient(90deg, #1a1aff, #4b5cff);
-        color: white;
-        border: none;
-        border-radius: 12px;
-        font-weight: 700;
-        padding: 0.7rem 1.4rem;
-    }
-
-    .stDownloadButton button {
+    .stButton button, .stDownloadButton button {
         background: linear-gradient(90deg, #1a1aff, #4b5cff);
         color: white;
         border: none;
@@ -82,13 +45,6 @@ st.markdown("""
         border: 1px dashed #4b5cff;
         border-radius: 14px;
         padding: 0.8rem;
-    }
-
-    .stAlert {
-        background-color: #0a0a2e;
-        border-left: 4px solid #1a1aff;
-        border-radius: 10px;
-        color: #ffffff;
     }
 
     .hero {
@@ -123,10 +79,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────────────────────
-
 entity = st.sidebar.selectbox("Entidad", ["Dlocal Mexico", "Demerge Mexico"])
 
 tolerance = st.sidebar.number_input(
@@ -145,9 +97,6 @@ col_date = st.sidebar.text_input("Fecha", value="")
 col_amount = st.sidebar.text_input("Monto", value="")
 col_processor = st.sidebar.text_input("Procesador", value="")
 
-# ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
 
 def get_rules(entity):
     return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
@@ -234,10 +183,6 @@ def clean_amount(series):
     ).fillna(0)
 
 
-# ─────────────────────────────────────────────────────────────
-# PROCESSORS
-# ─────────────────────────────────────────────────────────────
-
 def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico"):
     if not isinstance(text_to_match, str):
         return None
@@ -294,10 +239,6 @@ def normalize_processor(name):
 
     return processor_map.get(clean, str(name).strip())
 
-
-# ─────────────────────────────────────────────────────────────
-# PARSE KYRIBA
-# ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
 def parse_kyriba(file_bytes, file_name, entity):
@@ -393,10 +334,6 @@ def parse_kyriba(file_bytes, file_name, entity):
         return pd.DataFrame()
 
 
-# ─────────────────────────────────────────────────────────────
-# PARSE PAYINS
-# ─────────────────────────────────────────────────────────────
-
 @st.cache_data(show_spinner=False)
 def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
     try:
@@ -483,16 +420,10 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         work["Processor"] = df[processor_col].apply(normalize_processor)
 
         code_col = find_column(df, ["Code", "Payment Method Code", "Payment Method", "PM Code"])
-        if code_col:
-            work["Payment Method Code"] = df[code_col]
-        else:
-            work["Payment Method Code"] = ""
+        work["Payment Method Code"] = df[code_col] if code_col else ""
 
         country_col = find_column(df, ["Country", "Pais", "País"])
-        if country_col:
-            work["Country"] = df[country_col]
-        else:
-            work["Country"] = ""
+        work["Country"] = df[country_col] if country_col else ""
 
         work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
         work = work[work["Date"].notna()]
@@ -509,10 +440,6 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         return pd.DataFrame()
 
 
-# ─────────────────────────────────────────────────────────────
-# EXCEL EXPORT
-# ─────────────────────────────────────────────────────────────
-
 def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output = BytesIO()
 
@@ -525,10 +452,6 @@ def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output.seek(0)
     return output
 
-
-# ─────────────────────────────────────────────────────────────
-# UPLOADERS
-# ─────────────────────────────────────────────────────────────
 
 col1, col2 = st.columns(2)
 
@@ -546,10 +469,6 @@ with col2:
         accept_multiple_files=True
     )
 
-
-# ─────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────
 
 if kyriba_files and payins_files:
     kyriba_dfs = []
@@ -585,6 +504,50 @@ if kyriba_files and payins_files:
 
     payins_df = pd.concat(payins_dfs, ignore_index=True)
     st.success(f"Archivos Payins combinados: {len(payins_dfs)}")
+
+    # ── FILTRO DE FECHAS COMÚN ─────────────────────────────
+
+    kyriba_min = kyriba_df["Transaction date"].min().date()
+    kyriba_max = kyriba_df["Transaction date"].max().date()
+
+    payins_min = payins_df["Date"].min().date()
+    payins_max = payins_df["Date"].max().date()
+
+    st.warning(
+        f"Rango Kyriba: {kyriba_min} al {kyriba_max} | "
+        f"Rango Payins: {payins_min} al {payins_max}"
+    )
+
+    default_start = max(kyriba_min, payins_min)
+    default_end = min(kyriba_max, payins_max)
+
+    if default_start > default_end:
+        st.error("No hay fechas en común entre Kyriba y Payins. Revisá los archivos cargados.")
+        st.stop()
+
+    date_range = st.date_input(
+        "Seleccioná el rango de fechas a comparar",
+        value=(default_start, default_end),
+        min_value=min(kyriba_min, payins_min),
+        max_value=max(kyriba_max, payins_max)
+    )
+
+    if len(date_range) != 2:
+        st.stop()
+
+    start_date, end_date = date_range
+
+    kyriba_df = kyriba_df[
+        (kyriba_df["Transaction date"].dt.date >= start_date)
+        & (kyriba_df["Transaction date"].dt.date <= end_date)
+    ]
+
+    payins_df = payins_df[
+        (payins_df["Date"].dt.date >= start_date)
+        & (payins_df["Date"].dt.date <= end_date)
+    ]
+
+    st.info(f"Comparando únicamente: {start_date} al {end_date}")
 
     processors = sorted(
         set(kyriba_df["Processor"].unique())
