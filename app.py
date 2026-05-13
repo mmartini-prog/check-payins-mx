@@ -6,8 +6,126 @@ from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
 
 st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide")
 
-st.title("📊 Check Payins México")
-st.write("Dashboard para comparar movimientos bancarios Kyriba contra estimaciones de Payins.")
+# ─────────────────────────────────────────────────────────────
+# STYLE DLOCAL
+# ─────────────────────────────────────────────────────────────
+
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #05051a;
+        color: #ffffff;
+    }
+
+    .block-container {
+        padding-top: 2rem;
+        padding-left: 2.5rem;
+        padding-right: 2.5rem;
+    }
+
+    section[data-testid="stSidebar"] {
+        background-color: #07071f;
+        border-right: 1px solid #1a1aff;
+    }
+
+    h1, h2, h3 {
+        color: #ffffff !important;
+        font-weight: 800 !important;
+    }
+
+    p, label, span, div {
+        color: #c8d4ff;
+    }
+
+    div[data-testid="metric-container"] {
+        background: linear-gradient(135deg, #0a0a2e, #101050);
+        border: 1px solid #1a1aff;
+        border-radius: 16px;
+        padding: 1rem;
+        box-shadow: 0 0 18px rgba(26, 26, 255, 0.25);
+    }
+
+    div[data-testid="metric-container"] label {
+        color: #a0b4ff !important;
+    }
+
+    div[data-testid="metric-container"] div {
+        color: #ffffff !important;
+    }
+
+    .stButton button {
+        background: linear-gradient(90deg, #1a1aff, #4b5cff);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        font-weight: 700;
+        padding: 0.7rem 1.4rem;
+    }
+
+    .stDownloadButton button {
+        background: linear-gradient(90deg, #1a1aff, #4b5cff);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        font-weight: 700;
+        padding: 0.7rem 1.4rem;
+    }
+
+    .stDataFrame {
+        border: 1px solid #1a1aff;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+
+    .stFileUploader {
+        background-color: #0a0a2e;
+        border: 1px dashed #4b5cff;
+        border-radius: 14px;
+        padding: 0.8rem;
+    }
+
+    .stAlert {
+        background-color: #0a0a2e;
+        border-left: 4px solid #1a1aff;
+        border-radius: 10px;
+        color: #ffffff;
+    }
+
+    .hero {
+        background: linear-gradient(135deg, #07071f, #101050);
+        border: 1px solid #1a1aff;
+        border-radius: 22px;
+        padding: 2rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 0 30px rgba(26, 26, 255, 0.25);
+    }
+
+    .hero-title {
+        color: #ffffff;
+        font-size: 2.4rem;
+        font-weight: 900;
+        margin-bottom: 0.4rem;
+    }
+
+    .hero-subtitle {
+        color: #a0b4ff;
+        font-size: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="hero">
+    <div class="hero-title">Check Payins México</div>
+    <div class="hero-subtitle">
+        Comparación de movimientos bancarios Kyriba contra estimaciones de Payins.
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────
 
 entity = st.sidebar.selectbox("Entidad", ["Dlocal Mexico", "Demerge Mexico"])
 
@@ -21,11 +139,15 @@ tolerance = st.sidebar.number_input(
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Columnas Payins estimados")
+st.sidebar.caption("Dejalo vacío para autodetectar columnas.")
 
 col_date = st.sidebar.text_input("Fecha", value="")
 col_amount = st.sidebar.text_input("Monto", value="")
 col_processor = st.sidebar.text_input("Procesador", value="")
 
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
 
 def get_rules(entity):
     return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
@@ -59,21 +181,25 @@ def find_header_row(file_bytes, file_name):
     buf = io.BytesIO(file_bytes)
 
     if is_csv:
-        raw = pd.read_csv(buf, header=None, nrows=60, encoding="utf-8-sig")
+        raw = pd.read_csv(buf, header=None, nrows=80, encoding="utf-8-sig")
     else:
-        raw = pd.read_excel(buf, header=None, nrows=60)
+        raw = pd.read_excel(buf, header=None, nrows=80)
 
     header_keywords = [
         "transaction date",
         "value date",
         "booking date",
         "date",
+        "payment date",
         "account code",
         "account id",
         "description",
         "credit",
         "debit",
         "amount",
+        "total local amount",
+        "name",
+        "processor",
         "complementary info",
     ]
 
@@ -93,6 +219,24 @@ def find_header_row(file_bytes, file_name):
 
     return None
 
+
+def clean_amount(series):
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace("MXN", "", regex=False)
+        .str.replace("USD", "", regex=False)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.strip(),
+        errors="coerce"
+    ).fillna(0)
+
+
+# ─────────────────────────────────────────────────────────────
+# PROCESSORS
+# ─────────────────────────────────────────────────────────────
 
 def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico"):
     if not isinstance(text_to_match, str):
@@ -118,39 +262,42 @@ def normalize_processor(name):
 
     processor_map = {
         "banorte": "Banorte",
+        "banco banorte": "Banorte",
+        "demerge banorte": "Banorte",
+        "dlocal banorte": "Banorte",
+
         "evo mpgs": "EVO MPGs",
         "evopaymx": "EVO MPGs",
+        "evo payments": "EVO MPGs",
+
         "hey banregio": "Hey Banregio",
         "banregio": "Hey Banregio",
+        "banco banregio": "Hey Banregio",
+
         "mercadopago": "Mercadopago",
         "mercado pago": "Mercadopago",
         "mp": "Mercadopago",
+
         "openpay": "Openpay",
+        "openpay spei": "Openpay",
+        "openpay_spei": "Openpay",
         "openpay paynet": "Openpay_paynet",
         "openpay_paynet": "Openpay_paynet",
         "paynet": "Openpay_paynet",
+
         "oxxo pay": "OXXO Pay",
         "oxxopay": "OXXO Pay",
         "oxxo": "OXXO Pay",
+
         "arcus": "Arcus",
     }
 
     return processor_map.get(clean, str(name).strip())
 
 
-def clean_amount(series):
-    return pd.to_numeric(
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-        .str.replace("$", "", regex=False)
-        .str.replace("MXN", "", regex=False)
-        .str.replace("USD", "", regex=False)
-        .str.replace("(", "-", regex=False)
-        .str.replace(")", "", regex=False)
-        .str.strip(),
-        errors="coerce"
-    ).fillna(0)
-
+# ─────────────────────────────────────────────────────────────
+# PARSE KYRIBA
+# ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
 def parse_kyriba(file_bytes, file_name, entity):
@@ -246,18 +393,30 @@ def parse_kyriba(file_bytes, file_name, entity):
         return pd.DataFrame()
 
 
+# ─────────────────────────────────────────────────────────────
+# PARSE PAYINS
+# ─────────────────────────────────────────────────────────────
+
 @st.cache_data(show_spinner=False)
 def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
     try:
         import io
 
         is_csv = file_name.lower().endswith(".csv")
+        header_row = find_header_row(file_bytes, file_name)
+
         buf = io.BytesIO(file_bytes)
 
         if is_csv:
-            df = pd.read_csv(buf)
+            if header_row is not None:
+                df = pd.read_csv(buf, header=header_row, encoding="utf-8-sig")
+            else:
+                df = pd.read_csv(buf, encoding="utf-8-sig")
         else:
-            df = pd.read_excel(buf)
+            if header_row is not None:
+                df = pd.read_excel(buf, header=header_row)
+            else:
+                df = pd.read_excel(buf)
 
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
@@ -266,12 +425,12 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
             date_col = col_date if col_date in df.columns else find_column(df, [col_date])
         else:
             date_col = find_column(df, [
+                "Payment Date",
                 "Approved Date",
-                "Payment date",
                 "Payins Creation Date",
                 "Creation Date",
-                "Date",
                 "Created Date",
+                "Date",
                 "Day",
                 "Fecha"
             ])
@@ -280,6 +439,7 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
             amount_col = col_amount if col_amount in df.columns else find_column(df, [col_amount])
         else:
             amount_col = find_column(df, [
+                "Total Local Amount",
                 "Approved Amount Local",
                 "Approved amount local",
                 "Local Amount",
@@ -295,6 +455,8 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
             processor_col = col_processor if col_processor in df.columns else find_column(df, [col_processor])
         else:
             processor_col = find_column(df, [
+                "Name",
+                "Procesador",
                 "Processor",
                 "Payins Processor",
                 "Payment Processor",
@@ -320,6 +482,18 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         work["Amount"] = clean_amount(df[amount_col])
         work["Processor"] = df[processor_col].apply(normalize_processor)
 
+        code_col = find_column(df, ["Code", "Payment Method Code", "Payment Method", "PM Code"])
+        if code_col:
+            work["Payment Method Code"] = df[code_col]
+        else:
+            work["Payment Method Code"] = ""
+
+        country_col = find_column(df, ["Country", "Pais", "País"])
+        if country_col:
+            work["Country"] = df[country_col]
+        else:
+            work["Country"] = ""
+
         work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
         work = work[work["Date"].notna()]
         work = work[work["Processor"].notna()]
@@ -335,6 +509,10 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         return pd.DataFrame()
 
 
+# ─────────────────────────────────────────────────────────────
+# EXCEL EXPORT
+# ─────────────────────────────────────────────────────────────
+
 def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output = BytesIO()
 
@@ -347,6 +525,10 @@ def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output.seek(0)
     return output
 
+
+# ─────────────────────────────────────────────────────────────
+# UPLOADERS
+# ─────────────────────────────────────────────────────────────
 
 col1, col2 = st.columns(2)
 
@@ -364,6 +546,10 @@ with col2:
         accept_multiple_files=True
     )
 
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
 
 if kyriba_files and payins_files:
     kyriba_dfs = []
