@@ -1,5 +1,5 @@
 RULES_MX_DLOCAL = [
-    ("D LOCAL", "Banorte", "1151995728", "AA370"),
+     ("D LOCAL", "Banorte", "1151995728", "AA370"),,
     ("EVOPAYMX", "EVO MPGs", "70177702216", "AA376"),
     ("ABONO VENTAS", "Hey Banregio", "220881970023", "AA374"),
     ("MERCADO PAGOREFERENCIA", "Mercadopago", "1151995728", "AA370"),
