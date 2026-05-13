@@ -22,25 +22,88 @@ tolerance = st.sidebar.number_input(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Columnas Payins estimados")
 
-col_date = st.sidebar.text_input("Fecha", value="Approved Date")
-col_amount = st.sidebar.text_input("Monto", value="Approved Amount Local")
-col_processor = st.sidebar.text_input("Procesador", value="Processor")
+col_date = st.sidebar.text_input("Fecha", value="")
+col_amount = st.sidebar.text_input("Monto", value="")
+col_processor = st.sidebar.text_input("Procesador", value="")
 
 
 def get_rules(entity):
     return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
 
 
-def get_processor_mx(description, account_id=None, account_code=None, entity="Dlocal Mexico"):
-    if not isinstance(description, str):
+def normalize_text(value):
+    return str(value).strip().lower().replace("_", " ").replace("-", " ")
+
+
+def find_column(df, possible_names):
+    normalized_cols = {normalize_text(c): c for c in df.columns}
+
+    for name in possible_names:
+        n = normalize_text(name)
+        if n in normalized_cols:
+            return normalized_cols[n]
+
+    for name in possible_names:
+        n = normalize_text(name)
+        for col_norm, original_col in normalized_cols.items():
+            if n in col_norm or col_norm in n:
+                return original_col
+
+    return None
+
+
+def find_header_row(file_bytes, file_name):
+    import io
+
+    is_csv = file_name.lower().endswith(".csv")
+    buf = io.BytesIO(file_bytes)
+
+    if is_csv:
+        raw = pd.read_csv(buf, header=None, nrows=60, encoding="utf-8-sig")
+    else:
+        raw = pd.read_excel(buf, header=None, nrows=60)
+
+    header_keywords = [
+        "transaction date",
+        "value date",
+        "booking date",
+        "date",
+        "account code",
+        "account id",
+        "description",
+        "credit",
+        "debit",
+        "amount",
+        "complementary info",
+    ]
+
+    best_row = None
+    best_score = 0
+
+    for i, row in raw.iterrows():
+        row_text = " | ".join([normalize_text(v) for v in row.values])
+        score = sum(1 for kw in header_keywords if kw in row_text)
+
+        if score > best_score:
+            best_score = score
+            best_row = i
+
+    if best_score >= 2:
+        return best_row
+
+    return None
+
+
+def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico"):
+    if not isinstance(text_to_match, str):
         return None
 
-    description_clean = description.upper()
+    text_clean = text_to_match.upper()
     account_id_clean = str(account_id).strip()
     account_code_clean = str(account_code).strip()
 
     for keyword, processor, expected_account_id, expected_account_code in get_rules(entity):
-        if keyword.upper() in description_clean:
+        if keyword.upper() in text_clean:
             if account_id_clean == expected_account_id or account_code_clean == expected_account_code:
                 return processor
 
@@ -51,32 +114,42 @@ def normalize_processor(name):
     if not isinstance(name, str):
         return None
 
-    clean = name.strip().lower()
+    clean = normalize_text(name)
 
     processor_map = {
         "banorte": "Banorte",
         "evo mpgs": "EVO MPGs",
         "evopaymx": "EVO MPGs",
         "hey banregio": "Hey Banregio",
+        "banregio": "Hey Banregio",
         "mercadopago": "Mercadopago",
         "mercado pago": "Mercadopago",
+        "mp": "Mercadopago",
         "openpay": "Openpay",
+        "openpay paynet": "Openpay_paynet",
         "openpay_paynet": "Openpay_paynet",
+        "paynet": "Openpay_paynet",
         "oxxo pay": "OXXO Pay",
         "oxxopay": "OXXO Pay",
+        "oxxo": "OXXO Pay",
         "arcus": "Arcus",
     }
 
-    return processor_map.get(clean, name.strip())
+    return processor_map.get(clean, str(name).strip())
 
 
-def find_column(df, possible_names):
-    cols = [str(c).strip() for c in df.columns]
-    for name in possible_names:
-        for c in cols:
-            if c.lower() == name.lower():
-                return c
-    return None
+def clean_amount(series):
+    return pd.to_numeric(
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace("MXN", "", regex=False)
+        .str.replace("USD", "", regex=False)
+        .str.replace("(", "-", regex=False)
+        .str.replace(")", "", regex=False)
+        .str.strip(),
+        errors="coerce"
+    ).fillna(0)
 
 
 @st.cache_data(show_spinner=False)
@@ -85,107 +158,74 @@ def parse_kyriba(file_bytes, file_name, entity):
         import io
 
         is_csv = file_name.lower().endswith(".csv")
-        raw_buf = io.BytesIO(file_bytes)
-
-        if is_csv:
-            raw = pd.read_csv(raw_buf, header=None, nrows=40, encoding="utf-8-sig")
-        else:
-            raw = pd.read_excel(raw_buf, header=None, nrows=40)
-
-        header_row = None
-
-        for i, row in raw.iterrows():
-            row_values = [str(v) for v in row.values]
-            if any("Transaction date" in v for v in row_values):
-                header_row = i
-                break
+        header_row = find_header_row(file_bytes, file_name)
 
         if header_row is None:
             st.error(f"No encontré encabezados Kyriba en: {file_name}")
             return pd.DataFrame()
 
-        raw_buf = io.BytesIO(file_bytes)
+        buf = io.BytesIO(file_bytes)
 
         if is_csv:
-            df = pd.read_csv(raw_buf, header=header_row, dtype=str, encoding="utf-8-sig")
+            df = pd.read_csv(buf, header=header_row, dtype=str, encoding="utf-8-sig")
         else:
-            df = pd.read_excel(raw_buf, header=header_row, dtype=str)
+            df = pd.read_excel(buf, header=header_row, dtype=str)
 
         df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how="all")
 
-        account_code_col = find_column(df, ["Account code", "Account Code"])
-        account_id_col = find_column(df, ["Account ID", "Account Id"])
-        date_col = find_column(df, ["Transaction date", "Transaction Date"])
-        description_col = find_column(df, ["Description"])
-        complementary_col = find_column(df, ["Complementary info", "Complementary Info"])
-        credit_col = find_column(df, ["Credit", "Credit (MXN)", "Credit MXN", "Credit amount"])
+        account_code_col = find_column(df, ["Account code", "Account Code", "Account"])
+        account_id_col = find_column(df, ["Account ID", "Account Id", "Bank account", "Account number"])
+        date_col = find_column(df, ["Transaction date", "Value date", "Booking date", "Date", "Fecha"])
+        description_col = find_column(df, ["Description", "Transaction description", "Concept", "Concepto"])
+        complementary_col = find_column(df, ["Complementary info", "Complementary Info", "Additional info", "Reference"])
+        credit_col = find_column(df, ["Credit", "Credit (MXN)", "Credit MXN", "Credit amount", "Deposit"])
+        amount_col = find_column(df, ["Amount", "Amount (MXN)", "Transaction amount", "Importe"])
+        debit_col = find_column(df, ["Debit", "Debit (MXN)", "Debit MXN"])
 
         missing = []
-        if not account_code_col:
-            missing.append("Account code")
-        if not account_id_col:
-            missing.append("Account ID")
         if not date_col:
-            missing.append("Transaction date")
+            missing.append("Transaction date / Date")
         if not description_col:
             missing.append("Description")
-        if not credit_col:
-            missing.append("Credit / Credit (MXN)")
+        if not credit_col and not amount_col:
+            missing.append("Credit / Amount")
 
         if missing:
             st.error(f"Faltan columnas en Kyriba {file_name}: {missing}")
             st.write("Columnas disponibles:", list(df.columns))
             return pd.DataFrame()
 
-        keep_cols = [account_code_col, account_id_col, date_col, description_col, credit_col]
+        work = pd.DataFrame()
+        work["Account code"] = df[account_code_col] if account_code_col else ""
+        work["Account ID"] = df[account_id_col] if account_id_col else ""
+        work["Transaction date"] = df[date_col]
+        work["Description"] = df[description_col]
+        work["Complementary info"] = df[complementary_col] if complementary_col else ""
 
-        if complementary_col:
-            keep_cols.append(complementary_col)
+        if credit_col:
+            work["Credit"] = clean_amount(df[credit_col])
+        else:
+            work["Credit"] = clean_amount(df[amount_col])
 
-        df = df[keep_cols].copy()
+        if debit_col:
+            work["Debit"] = clean_amount(df[debit_col])
+        else:
+            work["Debit"] = 0
 
-        rename_map = {
-            account_code_col: "Account code",
-            account_id_col: "Account ID",
-            date_col: "Transaction date",
-            description_col: "Description",
-            credit_col: "Credit"
-        }
+        work = work[~work["Description"].isin(["Opening balance", "Closing balance", "Description"])]
+        work["Transaction date"] = pd.to_datetime(work["Transaction date"], errors="coerce")
+        work = work[work["Transaction date"].notna()]
 
-        if complementary_col:
-            rename_map[complementary_col] = "Complementary info"
-
-        df = df.rename(columns=rename_map)
-
-        df = df[df["Account code"].notna()]
-        df = df[~df["Description"].isin(["Opening balance", "Closing balance", "Description"])]
-
-        df["Transaction date"] = pd.to_datetime(df["Transaction date"], errors="coerce")
-        df = df[df["Transaction date"].notna()]
-
-        df["Credit"] = (
-            df["Credit"]
-            .astype(str)
-            .str.replace(",", "", regex=False)
-            .str.replace("$", "", regex=False)
-            .str.replace("MXN", "", regex=False)
-            .str.strip()
+        work["Text to match"] = (
+            work["Description"].astype(str)
+            + " "
+            + work["Complementary info"].astype(str)
         )
 
-        df["Credit"] = pd.to_numeric(df["Credit"], errors="coerce").fillna(0)
-
-        if "Complementary info" in df.columns:
-            df["Text to match"] = (
-                df["Description"].astype(str)
-                + " "
-                + df["Complementary info"].astype(str)
-            )
-        else:
-            df["Text to match"] = df["Description"].astype(str)
-
-        df["Processor"] = df.apply(
+        work["Processor"] = work.apply(
             lambda r: get_processor_mx(
-                description=r["Text to match"],
+                text_to_match=r["Text to match"],
                 account_id=r["Account ID"],
                 account_code=r["Account code"],
                 entity=entity,
@@ -193,12 +233,13 @@ def parse_kyriba(file_bytes, file_name, entity):
             axis=1,
         )
 
-        df = df[df["Processor"].notna()].copy()
+        work = work[work["Processor"].notna()].copy()
+        work = work[work["Credit"] > 0].copy()
 
-        df["Day"] = df["Transaction date"].dt.strftime("%d/%m/%Y")
-        df["Source file"] = file_name
+        work["Day"] = work["Transaction date"].dt.strftime("%d/%m/%Y")
+        work["Source file"] = file_name
 
-        return df
+        return work
 
     except Exception as e:
         st.error(f"Error leyendo Kyriba {file_name}: {e}")
@@ -219,39 +260,75 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
             df = pd.read_excel(buf)
 
         df.columns = [str(c).strip() for c in df.columns]
+        df = df.dropna(how="all")
 
-        required = [col_date, col_amount, col_processor]
-        missing = [c for c in required if c not in df.columns]
+        if col_date:
+            date_col = col_date if col_date in df.columns else find_column(df, [col_date])
+        else:
+            date_col = find_column(df, [
+                "Approved Date",
+                "Payment date",
+                "Payins Creation Date",
+                "Creation Date",
+                "Date",
+                "Created Date",
+                "Day",
+                "Fecha"
+            ])
+
+        if col_amount:
+            amount_col = col_amount if col_amount in df.columns else find_column(df, [col_amount])
+        else:
+            amount_col = find_column(df, [
+                "Approved Amount Local",
+                "Approved amount local",
+                "Local Amount",
+                "LC Amount",
+                "$ Approved Amount Local",
+                "Amount Local",
+                "Amount",
+                "Approved Amount",
+                "Monto"
+            ])
+
+        if col_processor:
+            processor_col = col_processor if col_processor in df.columns else find_column(df, [col_processor])
+        else:
+            processor_col = find_column(df, [
+                "Processor",
+                "Payins Processor",
+                "Payment Processor",
+                "Acquirer",
+                "Gateway"
+            ])
+
+        missing = []
+        if not date_col:
+            missing.append("Fecha")
+        if not amount_col:
+            missing.append("Monto")
+        if not processor_col:
+            missing.append("Procesador")
 
         if missing:
             st.error(f"Faltan columnas en Payins estimados {file_name}: {missing}")
             st.write("Columnas disponibles:", list(df.columns))
             return pd.DataFrame()
 
-        df = df[[col_date, col_amount, col_processor]].copy()
-        df.columns = ["Date", "Amount", "Processor"]
+        work = pd.DataFrame()
+        work["Date"] = df[date_col]
+        work["Amount"] = clean_amount(df[amount_col])
+        work["Processor"] = df[processor_col].apply(normalize_processor)
 
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        df = df[df["Date"].notna()]
+        work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
+        work = work[work["Date"].notna()]
+        work = work[work["Processor"].notna()]
+        work = work[work["Amount"] != 0]
 
-        df["Amount"] = (
-            df["Amount"]
-            .astype(str)
-            .str.replace(",", "", regex=False)
-            .str.replace("$", "", regex=False)
-            .str.replace("MXN", "", regex=False)
-            .str.strip()
-        )
+        work["Day"] = work["Date"].dt.strftime("%d/%m/%Y")
+        work["Source file"] = file_name
 
-        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
-
-        df["Processor"] = df["Processor"].apply(normalize_processor)
-        df = df[df["Processor"].notna()].copy()
-
-        df["Day"] = df["Date"].dt.strftime("%d/%m/%Y")
-        df["Source file"] = file_name
-
-        return df
+        return work
 
     except Exception as e:
         st.error(f"Error leyendo Payins estimados {file_name}: {e}")
