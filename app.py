@@ -6,6 +6,10 @@ from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
 
 st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide")
 
+# ─────────────────────────────────────────────────────────────
+# STYLE
+# ─────────────────────────────────────────────────────────────
+
 st.markdown("""
 <style>
     .stApp { background-color: #05051a; color: #ffffff; }
@@ -79,6 +83,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────
+
 entity = st.sidebar.selectbox("Entidad", ["Dlocal Mexico", "Demerge Mexico"])
 
 tolerance = st.sidebar.number_input(
@@ -97,6 +105,9 @@ col_date = st.sidebar.text_input("Fecha", value="")
 col_amount = st.sidebar.text_input("Monto", value="")
 col_processor = st.sidebar.text_input("Procesador", value="")
 
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
 
 def get_rules(entity):
     return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
@@ -183,6 +194,10 @@ def clean_amount(series):
     ).fillna(0)
 
 
+# ─────────────────────────────────────────────────────────────
+# PROCESSORS
+# ─────────────────────────────────────────────────────────────
+
 def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico"):
     if not isinstance(text_to_match, str):
         return None
@@ -206,39 +221,62 @@ def normalize_processor(name):
     clean = normalize_text(name)
 
     processor_map = {
+        # BANORTE
         "banorte": "Banorte",
         "banco banorte": "Banorte",
-        "demerge banorte": "Banorte",
+        "banorte mx": "Banorte",
         "dlocal banorte": "Banorte",
+        "demerge banorte": "Banorte",
 
+        # EVO
         "evo mpgs": "EVO MPGs",
         "evopaymx": "EVO MPGs",
         "evo payments": "EVO MPGs",
+        "evo": "EVO MPGs",
 
+        # BANREGIO
         "hey banregio": "Hey Banregio",
         "banregio": "Hey Banregio",
         "banco banregio": "Hey Banregio",
 
+        # MERCADOPAGO
         "mercadopago": "Mercadopago",
         "mercado pago": "Mercadopago",
         "mp": "Mercadopago",
+        "mercado pago mx": "Mercadopago",
+        "mercado pago referencia": "Mercadopago",
 
+        # OPENPAY
         "openpay": "Openpay",
+        "dlocal openpay": "Openpay",
+        "openpay mx": "Openpay",
         "openpay spei": "Openpay",
         "openpay_spei": "Openpay",
+
+        # PAYNET
         "openpay paynet": "Openpay_paynet",
         "openpay_paynet": "Openpay_paynet",
         "paynet": "Openpay_paynet",
+        "paynet mx": "Openpay_paynet",
 
+        # OXXO
         "oxxo pay": "OXXO Pay",
         "oxxopay": "OXXO Pay",
         "oxxo": "OXXO Pay",
+        "oxxo mx": "OXXO Pay",
 
+        # ARCUS
         "arcus": "Arcus",
+        "arcus mx": "Arcus",
+        "dlocal arcus": "Arcus",
     }
 
     return processor_map.get(clean, str(name).strip())
 
+
+# ─────────────────────────────────────────────────────────────
+# PARSE KYRIBA
+# ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
 def parse_kyriba(file_bytes, file_name, entity):
@@ -333,6 +371,10 @@ def parse_kyriba(file_bytes, file_name, entity):
         st.error(f"Error leyendo Kyriba {file_name}: {e}")
         return pd.DataFrame()
 
+
+# ─────────────────────────────────────────────────────────────
+# PARSE PAYINS
+# ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
 def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
@@ -440,6 +482,10 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         return pd.DataFrame()
 
 
+# ─────────────────────────────────────────────────────────────
+# EXPORT
+# ─────────────────────────────────────────────────────────────
+
 def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output = BytesIO()
 
@@ -452,6 +498,10 @@ def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
     output.seek(0)
     return output
 
+
+# ─────────────────────────────────────────────────────────────
+# UPLOADERS
+# ─────────────────────────────────────────────────────────────
 
 col1, col2 = st.columns(2)
 
@@ -469,6 +519,10 @@ with col2:
         accept_multiple_files=True
     )
 
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
 
 if kyriba_files and payins_files:
     kyriba_dfs = []
@@ -504,6 +558,12 @@ if kyriba_files and payins_files:
 
     payins_df = pd.concat(payins_dfs, ignore_index=True)
     st.success(f"Archivos Payins combinados: {len(payins_dfs)}")
+
+    # ── DEBUG PROCESSORS ─────────────────────────────────────
+
+    with st.expander("🔎 Debug processors detectados"):
+        st.write("Processors Kyriba:", sorted(kyriba_df["Processor"].dropna().unique()))
+        st.write("Processors Payins:", sorted(payins_df["Processor"].dropna().unique()))
 
     # ── FILTRO DE FECHAS COMÚN ─────────────────────────────
 
