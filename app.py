@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
-from openpyxl import Workbook
 from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
 
 st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide")
@@ -10,10 +9,7 @@ st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide"
 st.title("📊 Check Payins México")
 st.write("Dashboard para comparar movimientos bancarios Kyriba contra estimaciones de Payins.")
 
-entity = st.sidebar.selectbox(
-    "Entidad",
-    ["Dlocal Mexico", "Demerge Mexico"]
-)
+entity = st.sidebar.selectbox("Entidad", ["Dlocal Mexico", "Demerge Mexico"])
 
 tolerance = st.sidebar.number_input(
     "Tolerancia sin alerta (%)",
@@ -32,9 +28,7 @@ col_processor = st.sidebar.text_input("Procesador", value="Processor")
 
 
 def get_rules(entity):
-    if entity == "Dlocal Mexico":
-        return RULES_MX_DLOCAL
-    return RULES_MX_DEMERGE
+    return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
 
 
 def get_processor_mx(description, account_id=None, account_code=None, entity="Dlocal Mexico"):
@@ -96,7 +90,7 @@ def parse_kyriba(file_bytes, file_name, entity):
                 break
 
         if header_row is None:
-            st.error("No encontré la fila de encabezados de Kyriba.")
+            st.error(f"No encontré encabezados Kyriba en: {file_name}")
             return pd.DataFrame()
 
         raw_buf = io.BytesIO(file_bytes)
@@ -112,7 +106,7 @@ def parse_kyriba(file_bytes, file_name, entity):
         missing = [c for c in required if c not in df.columns]
 
         if missing:
-            st.error(f"Faltan columnas en Kyriba: {missing}")
+            st.error(f"Faltan columnas en Kyriba {file_name}: {missing}")
             st.write("Columnas disponibles:", list(df.columns))
             return pd.DataFrame()
 
@@ -130,6 +124,7 @@ def parse_kyriba(file_bytes, file_name, entity):
             .str.replace(",", "", regex=False)
             .str.replace("$", "", regex=False)
         )
+
         df["Credit"] = pd.to_numeric(df["Credit"], errors="coerce").fillna(0)
 
         df["Processor"] = df.apply(
@@ -144,11 +139,12 @@ def parse_kyriba(file_bytes, file_name, entity):
 
         df = df[df["Processor"].notna()].copy()
         df["Day"] = df["Transaction date"].dt.strftime("%d/%m/%Y")
+        df["Source file"] = file_name
 
         return df
 
     except Exception as e:
-        st.error(f"Error leyendo Kyriba: {e}")
+        st.error(f"Error leyendo Kyriba {file_name}: {e}")
         return pd.DataFrame()
 
 
@@ -187,6 +183,7 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
             .str.replace(",", "", regex=False)
             .str.replace("$", "", regex=False)
         )
+
         df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
 
         df["Processor"] = df["Processor"].apply(normalize_processor)
@@ -200,12 +197,13 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         return pd.DataFrame()
 
 
-def build_excel(summary_df, detail_df):
+def build_excel(summary_df, detail_df, kyriba_raw_df):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary_df.to_excel(writer, index=False, sheet_name="Resumen")
         detail_df.to_excel(writer, index=False, sheet_name="Detalle")
+        kyriba_raw_df.to_excel(writer, index=False, sheet_name="Kyriba combinado")
 
     output.seek(0)
     return output
@@ -214,9 +212,10 @@ def build_excel(summary_df, detail_df):
 col1, col2 = st.columns(2)
 
 with col1:
-    kyriba_file = st.file_uploader(
-        "🏦 Archivo Kyriba / Banco",
-        type=["xlsx", "xls", "csv"]
+    kyriba_files = st.file_uploader(
+        "🏦 Archivos Kyriba / Banco",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True
     )
 
 with col2:
@@ -226,15 +225,30 @@ with col2:
     )
 
 
-if kyriba_file and payins_file:
-    kyriba_bytes = kyriba_file.read()
-    payins_bytes = payins_file.read()
+if kyriba_files and payins_file:
+    kyriba_dfs = []
 
-    kyriba_df = parse_kyriba(kyriba_bytes, kyriba_file.name, entity)
+    with st.spinner("Leyendo archivos Kyriba..."):
+        for file in kyriba_files:
+            file_bytes = file.read()
+            temp_df = parse_kyriba(file_bytes, file.name, entity)
+
+            if not temp_df.empty:
+                kyriba_dfs.append(temp_df)
+
+    if not kyriba_dfs:
+        st.error("No pude leer ningún archivo Kyriba válido.")
+        st.stop()
+
+    kyriba_df = pd.concat(kyriba_dfs, ignore_index=True)
+
+    payins_bytes = payins_file.read()
     payins_df = parse_payins(payins_bytes, payins_file.name, col_date, col_amount, col_processor)
 
-    if kyriba_df.empty or payins_df.empty:
+    if payins_df.empty:
         st.stop()
+
+    st.success(f"Archivos Kyriba combinados: {len(kyriba_dfs)}")
 
     processors = sorted(set(kyriba_df["Processor"].unique()) | set(payins_df["Processor"].unique()))
 
@@ -272,15 +286,20 @@ if kyriba_file and payins_file:
         detail["Diferencia MXN"] = detail["Banco MXN"] - detail["Payins estimados MXN"]
 
         detail["Dif %"] = detail.apply(
-            lambda r: (r["Diferencia MXN"] / r["Payins estimados MXN"] * 100)
-            if r["Payins estimados MXN"] != 0 else 0,
+            lambda r: (
+                r["Diferencia MXN"] / r["Payins estimados MXN"] * 100
+            ) if r["Payins estimados MXN"] != 0 else 0,
             axis=1
         )
 
         detail["Estado"] = detail.apply(
             lambda r: "⚠️ Sin dato Payins"
             if r["Payins estimados MXN"] == 0
-            else ("✅ OK" if abs(r["Dif %"]) <= tolerance else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")),
+            else (
+                "✅ OK"
+                if abs(r["Dif %"]) <= tolerance
+                else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")
+            ),
             axis=1
         )
 
@@ -295,15 +314,20 @@ if kyriba_file and payins_file:
         )
 
         summary["Dif %"] = summary.apply(
-            lambda r: (r["Diferencia MXN"] / r["Payins estimados MXN"] * 100)
-            if r["Payins estimados MXN"] != 0 else 0,
+            lambda r: (
+                r["Diferencia MXN"] / r["Payins estimados MXN"] * 100
+            ) if r["Payins estimados MXN"] != 0 else 0,
             axis=1
         )
 
         summary["Estado"] = summary.apply(
             lambda r: "⚠️ Sin dato Payins"
             if r["Payins estimados MXN"] == 0
-            else ("✅ OK" if abs(r["Dif %"]) <= tolerance else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")),
+            else (
+                "✅ OK"
+                if abs(r["Dif %"]) <= tolerance
+                else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")
+            ),
             axis=1
         )
 
@@ -326,7 +350,10 @@ if kyriba_file and payins_file:
         st.subheader("📅 Detalle por día")
         st.dataframe(detail, use_container_width=True, hide_index=True)
 
-        excel_file = build_excel(summary, detail)
+        with st.expander("Ver Kyriba combinado"):
+            st.dataframe(kyriba_df, use_container_width=True, hide_index=True)
+
+        excel_file = build_excel(summary, detail, kyriba_df)
 
         st.download_button(
             label="⬇️ Descargar Excel conciliación",
@@ -336,4 +363,4 @@ if kyriba_file and payins_file:
         )
 
 else:
-    st.info("Subí el archivo Kyriba y el archivo de estimaciones Payins para comenzar.")
+    st.info("Subí uno o más archivos Kyriba y el archivo de estimaciones Payins para comenzar.")
