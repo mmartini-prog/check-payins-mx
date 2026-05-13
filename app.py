@@ -609,30 +609,24 @@ if kyriba_files and payins_files:
 
     st.info(f"Comparando únicamente: {start_date} al {end_date}")
 
-   # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
+     # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
 
-kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
-payins_processors_original = set(payins_df["Processor"].dropna().unique())
+    kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
+    payins_processors_original = set(payins_df["Processor"].dropna().unique())
 
-payins_excluded = sorted(payins_processors_original - kyriba_processors)
+    payins_excluded = sorted(payins_processors_original - kyriba_processors)
 
-with st.expander("🔎 Procesadores Payins excluidos por no existir en Kyriba"):
-    if payins_excluded:
-        st.write(payins_excluded)
-    else:
-        st.write("No se excluyó ningún procesador.")
+    with st.expander("🔎 Procesadores Payins excluidos por no existir en Kyriba"):
+        if payins_excluded:
+            st.write(payins_excluded)
+        else:
+            st.write("No se excluyó ningún procesador.")
 
-payins_df = payins_df[
-    payins_df["Processor"].isin(kyriba_processors)
-].copy()
+    payins_df = payins_df[
+        payins_df["Processor"].isin(kyriba_processors)
+    ].copy()
 
-processors = sorted(kyriba_processors)
-
-selected_processors = st.multiselect(
-    "Procesadores a analizar",
-    options=processors,
-    default=processors
-)
+    processors = sorted(kyriba_processors)
 
     selected_processors = st.multiselect(
         "Procesadores a analizar",
