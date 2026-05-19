@@ -265,12 +265,17 @@ def normalize_processor(name):
         "oxxo": "OXXO Pay",
         "oxxo mx": "OXXO Pay",
 
-        # ARCUS
-        "arcus": "Arcus",
-        "arcus mx": "Arcus",
-        "dlocal arcus": "Arcus",
-    }
+       # ARCUS
+"arcus": "Arcus",
+"arcus mx": "Arcus",
+"dlocal arcus": "Arcus",
 
+# KUSHKI
+"kushki": "Kushki",
+
+# OXXO
+"oxxo": "OXXO Pay",
+},
     return processor_map.get(clean, str(name).strip())
 
 
