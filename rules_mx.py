@@ -1,5 +1,4 @@
 RULES_MX_DLOCAL = [
-
     # BANORTE
     ("D LOCAL", "Banorte", "1151995728", "AA370"),
 
@@ -12,11 +11,8 @@ RULES_MX_DLOCAL = [
     # MERCADOPAGO
     ("MERCADO PAGOREFERENCIA", "Mercadopago", "1151995728", "AA370"),
 
-    # OPENPAY
+    # OPENPAY / PAYNET
     ("OPENMX", "Openpay", "116158803", "AA375"),
-
-    # OPENPAY PAYNET
-    ("OPENMX", "Openpay_paynet", "116158803", "AA375"),
 
     # OXXO PAY
     ("CADENA COMERCIAL OXXO SA", "OXXO Pay", "1151995728", "AA370"),
@@ -25,9 +21,7 @@ RULES_MX_DLOCAL = [
     ("LIQ DLOCALMEXICO", "Kushki", "1151995728", "AA370"),
 ]
 
-
 RULES_MX_DEMERGE = [
-
     # BANORTE
     ("D LOCAL", "Banorte", "1011320992", "AA350"),
 
