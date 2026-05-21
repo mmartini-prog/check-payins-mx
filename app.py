@@ -109,8 +109,8 @@ col_processor = st.sidebar.text_input("Procesador", value="")
 # HELPERS
 # ─────────────────────────────────────────────────────────────
 
-def get_rules(entity):
-    return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
+def get_rules(entity_name):
+    return RULES_MX_DLOCAL if entity_name == "Dlocal Mexico" else RULES_MX_DEMERGE
 
 
 def normalize_text(value):
@@ -140,10 +140,13 @@ def find_header_row(file_bytes, file_name):
     is_csv = file_name.lower().endswith(".csv")
     buf = io.BytesIO(file_bytes)
 
-    if is_csv:
-        raw = pd.read_csv(buf, header=None, nrows=80, encoding="utf-8-sig")
-    else:
-        raw = pd.read_excel(buf, header=None, nrows=80)
+    try:
+        if is_csv:
+            raw = pd.read_csv(buf, header=None, nrows=80, encoding="utf-8-sig")
+        else:
+            raw = pd.read_excel(buf, header=None, nrows=80)
+    except Exception:
+        return None
 
     header_keywords = [
         "transaction date",
@@ -158,8 +161,10 @@ def find_header_row(file_bytes, file_name):
         "debit",
         "amount",
         "total local amount",
+        "total usd amount",
         "name",
         "processor",
+        "code",
         "complementary info",
     ]
 
@@ -174,10 +179,7 @@ def find_header_row(file_bytes, file_name):
             best_score = score
             best_row = i
 
-    if best_score >= 2:
-        return best_row
-
-    return None
+    return best_row if best_score >= 2 else None
 
 
 def clean_amount(series):
@@ -198,7 +200,7 @@ def clean_amount(series):
 # PROCESSORS
 # ─────────────────────────────────────────────────────────────
 
-def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico"):
+def get_processor_mx(text_to_match, account_id=None, account_code=None, entity_name="Dlocal Mexico"):
     if not isinstance(text_to_match, str):
         return None
 
@@ -206,7 +208,7 @@ def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="
     account_id_clean = str(account_id).strip()
     account_code_clean = str(account_code).strip()
 
-    for keyword, processor, expected_account_id, expected_account_code in get_rules(entity):
+    for keyword, processor, expected_account_id, expected_account_code in get_rules(entity_name):
         if keyword.upper() in text_clean:
             if account_id_clean == expected_account_id or account_code_clean == expected_account_code:
                 return processor
@@ -265,17 +267,17 @@ def normalize_processor(name):
         "oxxo": "OXXO Pay",
         "oxxo mx": "OXXO Pay",
 
-       # ARCUS
-"arcus": "Arcus",
-"arcus mx": "Arcus",
-"dlocal arcus": "Arcus",
+        # ARCUS
+        "arcus": "Arcus",
+        "arcus mx": "Arcus",
+        "dlocal arcus": "Arcus",
 
-# KUSHKI
-"kushki": "Kushki",
+        # KUSHKI
+        "kushki": "Kushki",
+        "kushki mx": "Kushki",
+        "dlocal kushki": "Kushki",
+    }
 
-# OXXO
-"oxxo": "OXXO Pay",
-},
     return processor_map.get(clean, str(name).strip())
 
 
@@ -284,8 +286,9 @@ def normalize_processor(name):
 # ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-@st.cache_data(show_spinner=False)
-def parse_kyriba(file_bytes, file_name, entity):
+def parse_kyriba(file_bytes, file_name, entity_name):
+    try:
+        import io
 
         is_csv = file_name.lower().endswith(".csv")
         header_row = find_header_row(file_bytes, file_name)
@@ -313,14 +316,14 @@ def parse_kyriba(file_bytes, file_name, entity):
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
 
-        account_code_col = find_column(df, ["Account code", "Account Code", "Account"])
-        account_id_col = find_column(df, ["Account ID", "Account Id", "Bank account", "Account number"])
+        account_code_col = find_column(df, ["Account code", "Account Code", "Account", "Cuenta"])
+        account_id_col = find_column(df, ["Account ID", "Account Id", "Bank account", "Account number", "Número de cuenta"])
         date_col = find_column(df, ["Transaction date", "Value date", "Booking date", "Date", "Fecha"])
-        description_col = find_column(df, ["Description", "Transaction description", "Concept", "Concepto"])
-        complementary_col = find_column(df, ["Complementary info", "Complementary Info", "Additional info", "Reference"])
-        credit_col = find_column(df, ["Credit", "Credit (MXN)", "Credit MXN", "Credit amount", "Deposit"])
+        description_col = find_column(df, ["Description", "Transaction description", "Concept", "Concepto", "Descripción"])
+        complementary_col = find_column(df, ["Complementary info", "Complementary Info", "Additional info", "Reference", "Referencia"])
+        credit_col = find_column(df, ["Credit", "Credit (MXN)", "Credit MXN", "Credit amount", "Deposit", "Crédito"])
         amount_col = find_column(df, ["Amount", "Amount (MXN)", "Transaction amount", "Importe"])
-        debit_col = find_column(df, ["Debit", "Debit (MXN)", "Debit MXN"])
+        debit_col = find_column(df, ["Debit", "Debit (MXN)", "Debit MXN", "Débito"])
 
         missing = []
         if not date_col:
@@ -378,7 +381,7 @@ def parse_kyriba(file_bytes, file_name, entity):
                 text_to_match=r["Text to match"],
                 account_id=r["Account ID"],
                 account_code=r["Account code"],
-                entity=entity,
+                entity_name=entity_name,
             ),
             axis=1,
         )
@@ -391,32 +394,40 @@ def parse_kyriba(file_bytes, file_name, entity):
 
         return work
 
+    except Exception as e:
+        st.error(f"Error leyendo Kyriba {file_name}: {e}")
+        return pd.DataFrame()
+
+
+# ─────────────────────────────────────────────────────────────
+# PARSE PAYINS
+# ─────────────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
 def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
     try:
-    header_row = find_header_row(file_bytes, file_name)
+        import io
 
-    # Para exports de Accounting Payins donde el header viene en la fila 2
-    if header_row is None:
-        header_row = 0
+        is_csv = file_name.lower().endswith(".csv")
+        header_row = find_header_row(file_bytes, file_name)
 
-    df = pd.read_excel(
-        io.BytesIO(file_bytes),
-        header=header_row
-    )
+        # Fallback para exports de Accounting Payins donde el header viene arriba
+        if header_row is None:
+            header_row = 0
 
-except Exception as e:
-    st.error(f"Error leyendo Payins {file_name}: {e}")
-    return None
+        buf = io.BytesIO(file_bytes)
+
         if is_csv:
-            if header_row is not None:
-                df = pd.read_csv(buf, header=header_row, encoding="utf-8-sig")
-            else:
-                df = pd.read_csv(buf, encoding="utf-8-sig")
+            df = pd.read_csv(
+                buf,
+                header=header_row,
+                encoding="utf-8-sig"
+            )
         else:
-            if header_row is not None:
-                df = pd.read_excel(buf, header=header_row)
-            else:
-                df = pd.read_excel(buf)
+            df = pd.read_excel(
+                buf,
+                header=header_row
+            )
 
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
@@ -630,7 +641,7 @@ if kyriba_files and payins_files:
 
     st.info(f"Comparando únicamente: {start_date} al {end_date}")
 
-     # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
+    # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
 
     kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
     payins_processors_original = set(payins_df["Processor"].dropna().unique())
@@ -762,3 +773,4 @@ if kyriba_files and payins_files:
 
 else:
     st.info("Subí uno o más archivos Kyriba y uno o más archivos de estimaciones Payins.")
+
