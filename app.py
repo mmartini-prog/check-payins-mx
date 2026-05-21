@@ -389,6 +389,10 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
         is_csv = file_name.lower().endswith(".csv")
         header_row = find_header_row(file_bytes, file_name)
 
+# Para exports de Accounting Payins donde el header viene en la fila 2
+if header_row is None:
+    header_row = 0
+
         buf = io.BytesIO(file_bytes)
 
         if is_csv:
