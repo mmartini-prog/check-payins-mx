@@ -284,6 +284,7 @@ def normalize_processor(name):
 # ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def parse_kyriba(file_bytes, file_name, entity):
     try:
         import io
@@ -298,9 +299,18 @@ def parse_kyriba(file_bytes, file_name, entity):
         buf = io.BytesIO(file_bytes)
 
         if is_csv:
-            df = pd.read_csv(buf, header=header_row, dtype=str, encoding="utf-8-sig")
+            df = pd.read_csv(
+                buf,
+                header=header_row,
+                dtype=str,
+                encoding="utf-8-sig"
+            )
         else:
-            df = pd.read_excel(buf, header=header_row, dtype=str)
+            df = pd.read_excel(
+                buf,
+                header=header_row,
+                dtype=str
+            )
 
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
@@ -344,8 +354,19 @@ def parse_kyriba(file_bytes, file_name, entity):
         else:
             work["Debit"] = 0
 
-        work = work[~work["Description"].isin(["Opening balance", "Closing balance", "Description"])]
-        work["Transaction date"] = pd.to_datetime(work["Transaction date"], errors="coerce")
+        work = work[
+            ~work["Description"].isin([
+                "Opening balance",
+                "Closing balance",
+                "Description"
+            ])
+        ]
+
+        work["Transaction date"] = pd.to_datetime(
+            work["Transaction date"],
+            errors="coerce"
+        )
+
         work = work[work["Transaction date"].notna()]
 
         work["Text to match"] = (
@@ -372,29 +393,22 @@ def parse_kyriba(file_bytes, file_name, entity):
 
         return work
 
-    except Exception as e:
-        st.error(f"Error leyendo Kyriba {file_name}: {e}")
-        return pd.DataFrame()
-
-
-# ─────────────────────────────────────────────────────────────
-# PARSE PAYINS
-# ─────────────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False)
 def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor):
     try:
-        import io
+    header_row = find_header_row(file_bytes, file_name)
 
-        is_csv = file_name.lower().endswith(".csv")
-        header_row = find_header_row(file_bytes, file_name)
+    # Para exports de Accounting Payins donde el header viene en la fila 2
+    if header_row is None:
+        header_row = 0
 
-# Para exports de Accounting Payins donde el header viene en la fila 2
-if header_row is None:
-    header_row = 0
+    df = pd.read_excel(
+        io.BytesIO(file_bytes),
+        header=header_row
+    )
 
-        buf = io.BytesIO(file_bytes)
-
+except Exception as e:
+    st.error(f"Error leyendo Payins {file_name}: {e}")
+    return None
         if is_csv:
             if header_row is not None:
                 df = pd.read_csv(buf, header=header_row, encoding="utf-8-sig")
