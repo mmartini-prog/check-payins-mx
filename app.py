@@ -1,8 +1,15 @@
+
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
-from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
+import re
+
+try:
+    from rules_mx import RULES_MX_DLOCAL, RULES_MX_DEMERGE
+except Exception:
+    RULES_MX_DLOCAL = []
+    RULES_MX_DEMERGE = []
 
 st.set_page_config(page_title="Check Payins MX", page_icon="📊", layout="wide")
 
@@ -25,7 +32,6 @@ st.markdown("""
         padding: 1rem;
         box-shadow: 0 0 18px rgba(26, 26, 255, 0.25);
     }
-
     div[data-testid="metric-container"] label { color: #a0b4ff !important; }
     div[data-testid="metric-container"] div { color: #ffffff !important; }
 
@@ -97,6 +103,17 @@ tolerance = st.sidebar.number_input(
     step=1
 )
 
+currency_filter = st.sidebar.selectbox(
+    "Moneda Kyriba a comparar",
+    ["MXN", "USD", "Todas"],
+    index=0
+)
+
+use_account_fallback = st.sidebar.checkbox(
+    "Si no hay regla, usar banco/cuenta Kyriba como processor",
+    value=True
+)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Columnas Payins estimados")
 st.sidebar.caption("Dejalo vacío para autodetectar columnas.")
@@ -104,26 +121,50 @@ st.sidebar.caption("Dejalo vacío para autodetectar columnas.")
 col_date = st.sidebar.text_input("Fecha", value="")
 col_amount = st.sidebar.text_input("Monto", value="")
 col_processor = st.sidebar.text_input("Procesador", value="")
+col_agent = st.sidebar.text_input("Entidad / Collection Agent", value="")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Mapping manual de cuentas Kyriba")
-st.sidebar.caption("Opcional. Un mapeo por línea, ejemplo: AA639=Banorte")
+st.sidebar.subheader("Mapping manual Kyriba")
+st.sidebar.caption("Formato: CODIGO=Processor, una línea por cuenta. Esto pisa reglas y autodetección.")
 manual_mapping_text = st.sidebar.text_area(
-    "Cuenta=Procesador",
-    value="",
-    height=120
+    "Cuenta Kyriba → Processor",
+    value=(
+        "AA639=Banco Santander\n"
+        "AB184=STP\n"
+        "AB072=Banorte\n"
+        "AA566=CITI\n"
+        "AA640=Banco Santander\n"
+        "AB279=Banco Santander"
+    ),
+    height=150
 )
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────
 
-def get_rules(entity):
-    return RULES_MX_DLOCAL if entity == "Dlocal Mexico" else RULES_MX_DEMERGE
+def get_rules(entity_name):
+    return RULES_MX_DLOCAL if entity_name == "Dlocal Mexico" else RULES_MX_DEMERGE
 
 
 def normalize_text(value):
     return str(value).strip().lower().replace("_", " ").replace("-", " ")
+
+
+def normalize_key(value):
+    return normalize_text(value).replace(".", "").replace(",", "").replace("/", " ").strip()
+
+
+def parse_manual_mapping(text):
+    mapping = {}
+    for line in str(text).splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() and v.strip():
+            mapping[k.strip().upper()] = normalize_processor(v.strip())
+    return mapping
 
 
 def find_column(df, possible_names):
@@ -149,13 +190,10 @@ def find_header_row(file_bytes, file_name):
     is_csv = file_name.lower().endswith(".csv")
     buf = io.BytesIO(file_bytes)
 
-    try:
-        if is_csv:
-            raw = pd.read_csv(buf, header=None, nrows=80, encoding="utf-8-sig")
-        else:
-            raw = pd.read_excel(buf, header=None, nrows=80)
-    except Exception:
-        return None
+    if is_csv:
+        raw = pd.read_csv(buf, header=None, nrows=100, encoding="utf-8-sig")
+    else:
+        raw = pd.read_excel(buf, header=None, nrows=100)
 
     header_keywords = [
         "transaction date",
@@ -172,10 +210,10 @@ def find_header_row(file_bytes, file_name):
         "amount",
         "total local amount",
         "amount approved",
-        "processor name",
-        "collection agent",
         "name",
         "processor",
+        "processor name",
+        "collection agent",
         "complementary info",
         "code",
     ]
@@ -197,8 +235,31 @@ def find_header_row(file_bytes, file_name):
     return None
 
 
+def read_raw_preview(file_bytes, file_name, nrows=5):
+    import io
+    is_csv = file_name.lower().endswith(".csv")
+    buf = io.BytesIO(file_bytes)
+    if is_csv:
+        return pd.read_csv(buf, header=None, nrows=nrows, encoding="utf-8-sig")
+    return pd.read_excel(buf, header=None, nrows=nrows)
+
+
+def extract_account_bank_from_preview(preview):
+    """Lee línea tipo: Account: AA639 Santander - MX - MX03 - M - 655... - MXN"""
+    try:
+        joined = " ".join(str(x) for x in preview.astype(str).values.flatten())
+        match = re.search(r"Account:\s*([A-Z0-9]+)\s+([^-]+)-", joined, flags=re.I)
+        if match:
+            code = match.group(1).strip().upper()
+            bank = match.group(2).strip()
+            return code, normalize_processor(bank)
+    except Exception:
+        pass
+    return None, None
+
+
 def clean_amount(series):
-    return pd.to_numeric(
+    cleaned = (
         series.astype(str)
         .str.replace(",", "", regex=False)
         .str.replace("$", "", regex=False)
@@ -206,119 +267,162 @@ def clean_amount(series):
         .str.replace("USD", "", regex=False)
         .str.replace("(", "-", regex=False)
         .str.replace(")", "", regex=False)
-        .str.strip(),
-        errors="coerce"
-    ).fillna(0)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
 
 
-def parse_manual_mapping(text):
-    mapping = {}
-    for line in str(text).splitlines():
-        if "=" in line:
-            key, val = line.split("=", 1)
-            key = key.strip()
-            val = val.strip()
-            if key and val:
-                mapping[key] = val
-    return mapping
+def get_credit_col_and_currency(df):
+    # Priorizar MXN si existe, luego USD, luego Credit genérico
+    for c in df.columns:
+        cn = normalize_text(c)
+        if "credit" in cn and "mxn" in cn:
+            return c, "MXN"
+    for c in df.columns:
+        cn = normalize_text(c)
+        if "credit" in cn and "usd" in cn:
+            return c, "USD"
+    for c in df.columns:
+        cn = normalize_text(c)
+        if "credit" in cn or "deposit" in cn:
+            return c, ""
+    return None, ""
+
+
+def get_debit_col(df):
+    for c in df.columns:
+        cn = normalize_text(c)
+        if "debit" in cn:
+            return c
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
 # PROCESSORS
 # ─────────────────────────────────────────────────────────────
 
-def get_processor_mx(text_to_match, account_id=None, account_code=None, entity="Dlocal Mexico", manual_map=None):
-    manual_map = manual_map or {}
-
-    account_code_clean = str(account_code).strip()
-    account_id_clean = str(account_id).strip()
-
-    if account_code_clean in manual_map:
-        return manual_map[account_code_clean]
-
-    if account_id_clean in manual_map:
-        return manual_map[account_id_clean]
-
-    if not isinstance(text_to_match, str):
-        return None
-
-    text_clean = text_to_match.upper()
-
-    for keyword, processor, expected_account_id, expected_account_code in get_rules(entity):
-        if keyword.upper() in text_clean:
-            if (
-                account_id_clean == str(expected_account_id).strip()
-                or account_code_clean == str(expected_account_code).strip()
-            ):
-                return processor
-
-    return None
-
-
 def normalize_processor(name):
     if not isinstance(name, str):
         return None
 
-    clean = normalize_text(name)
+    clean = normalize_key(name)
 
     processor_map = {
-        # BANORTE
+        # bancos / processors principales
         "banorte": "Banorte",
         "banco banorte": "Banorte",
         "banorte mx": "Banorte",
         "dlocal banorte": "Banorte",
         "demerge banorte": "Banorte",
 
-        # EVO
+        "banco bancomer": "Banco Bancomer",
+        "bancomer": "Banco Bancomer",
+        "bbva": "Banco Bancomer",
+
+        "banco santander": "Banco Santander",
+        "santander": "Banco Santander",
+        "santander mx": "Banco Santander",
+
+        "citi": "CITI",
+        "citibank": "CITI",
+
+        "stp": "STP",
+
         "evo mpgs": "EVO MPGs",
         "evopaymx": "EVO MPGs",
         "evo payments": "EVO MPGs",
         "evo": "EVO MPGs",
 
-        # BANREGIO
         "hey banregio": "Hey Banregio",
         "banregio": "Hey Banregio",
         "banco banregio": "Hey Banregio",
 
-        # MERCADOPAGO
         "mercadopago": "Mercadopago",
         "mercado pago": "Mercadopago",
         "mp": "Mercadopago",
         "mercado pago mx": "Mercadopago",
         "mercado pago referencia": "Mercadopago",
 
-        # OPENPAY
         "openpay": "Openpay",
         "dlocal openpay": "Openpay",
         "openpay mx": "Openpay",
         "openpay spei": "Openpay",
         "openpay_spei": "Openpay",
 
-        # PAYNET
         "openpay paynet": "Openpay_paynet",
         "openpay_paynet": "Openpay_paynet",
         "paynet": "Openpay_paynet",
         "paynet mx": "Openpay_paynet",
 
-        # OXXO
         "oxxo pay": "OXXO Pay",
         "oxxopay": "OXXO Pay",
         "oxxo": "OXXO Pay",
         "oxxo mx": "OXXO Pay",
 
-        # ARCUS / KUSHKI / STP
         "arcus": "Arcus",
         "arcus mx": "Arcus",
         "dlocal arcus": "Arcus",
+
         "kushki": "Kushki",
-        "stp": "STP",
+        "kushki card present": "Kushki Card Present",
+
+        "worldpay mx": "Worldpay MX",
+        "worldpay": "Worldpay MX",
+
+        "kueski": "Kueski",
+        "conekta": "Conekta",
+        "topps giftcard": "Topps GiftCard",
+        "datalogic": "Datalogic",
+        "didi bnpl": "Didi BNPL",
+        "affipay": "Affipay",
+        "astropaycard": "Astropaycard",
+        "bac credomatic international pa": "BAC Credomatic International PA",
     }
 
     return processor_map.get(clean, str(name).strip())
 
 
-def expected_collection_agent(entity):
-    return "Dlocal Mexico" if entity == "Dlocal Mexico" else "Demerge Mexico"
+def get_processor_mx(text_to_match, account_id=None, account_code=None, entity_name="Dlocal Mexico"):
+    if not isinstance(text_to_match, str):
+        return None
+
+    text_clean = text_to_match.upper()
+    account_id_clean = str(account_id).strip()
+    account_code_clean = str(account_code).strip().upper()
+
+    for keyword, processor, expected_account_id, expected_account_code in get_rules(entity_name):
+        if keyword.upper() in text_clean:
+            if (
+                str(expected_account_id).strip() == account_id_clean
+                or str(expected_account_code).strip().upper() == account_code_clean
+                or not expected_account_id
+                or not expected_account_code
+            ):
+                return normalize_processor(processor)
+
+    return None
+
+
+def infer_processor_from_kyriba_row(row, manual_mapping, account_bank=None):
+    code = str(row.get("Account code", "")).strip().upper()
+    if code in manual_mapping:
+        return manual_mapping[code]
+
+    processor = get_processor_mx(
+        text_to_match=row.get("Text to match", ""),
+        account_id=row.get("Account ID", ""),
+        account_code=code,
+        entity_name=entity,
+    )
+    if processor:
+        return processor
+
+    if use_account_fallback:
+        if account_bank:
+            return account_bank
+        return normalize_processor(code)
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -326,12 +430,15 @@ def expected_collection_agent(entity):
 # ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def parse_kyriba(file_bytes, file_name, entity, manual_mapping_text):
+def parse_kyriba(file_bytes, file_name, entity_name, manual_mapping_text, currency_filter, use_fallback):
     try:
         import io
 
-        manual_map = parse_manual_mapping(manual_mapping_text)
+        manual_mapping = parse_manual_mapping(manual_mapping_text)
         is_csv = file_name.lower().endswith(".csv")
+        preview = read_raw_preview(file_bytes, file_name, nrows=5)
+        _, account_bank = extract_account_bank_from_preview(preview)
+
         header_row = find_header_row(file_bytes, file_name)
 
         if header_row is None:
@@ -341,30 +448,21 @@ def parse_kyriba(file_bytes, file_name, entity, manual_mapping_text):
         buf = io.BytesIO(file_bytes)
 
         if is_csv:
-            df = pd.read_csv(
-                buf,
-                header=header_row,
-                dtype=str,
-                encoding="utf-8-sig"
-            )
+            df = pd.read_csv(buf, header=header_row, dtype=str, encoding="utf-8-sig")
         else:
-            df = pd.read_excel(
-                buf,
-                header=header_row,
-                dtype=str
-            )
+            df = pd.read_excel(buf, header=header_row, dtype=str)
 
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
 
-        account_code_col = find_column(df, ["Account code", "Account Code", "Account", "Cuenta", "Código de cuenta"])
-        account_id_col = find_column(df, ["Account ID", "Account Id", "Bank account", "Account number", "Número de cuenta"])
-        date_col = find_column(df, ["Transaction date", "Value date", "Booking date", "Date", "Fecha", "Fecha operación"])
-        description_col = find_column(df, ["Description", "Transaction description", "Concept", "Concepto", "Descripción"])
-        complementary_col = find_column(df, ["Complementary info", "Complementary Info", "Additional info", "Reference", "Referencia"])
-        credit_col = find_column(df, ["Credit", "Credit (MXN)", "Credit MXN", "Credit amount", "Deposit", "Crédito", "Abono"])
+        account_code_col = find_column(df, ["Account code", "Account Code", "Account"])
+        account_id_col = find_column(df, ["Account ID", "Account Id", "Bank account", "Account number"])
+        date_col = find_column(df, ["Transaction date", "Value date", "Booking date", "Date", "Fecha"])
+        description_col = find_column(df, ["Description", "Transaction description", "Concept", "Concepto"])
+        complementary_col = find_column(df, ["Complementary info", "Complementary Info", "Additional info", "Reference"])
+        credit_col, detected_currency = get_credit_col_and_currency(df)
         amount_col = find_column(df, ["Amount", "Amount (MXN)", "Transaction amount", "Importe"])
-        debit_col = find_column(df, ["Debit", "Debit (MXN)", "Debit MXN", "Débito", "Cargo"])
+        debit_col = get_debit_col(df)
 
         missing = []
         if not date_col:
@@ -379,32 +477,38 @@ def parse_kyriba(file_bytes, file_name, entity, manual_mapping_text):
             st.write("Columnas disponibles:", list(df.columns))
             return pd.DataFrame()
 
+        if currency_filter != "Todas" and detected_currency and detected_currency != currency_filter:
+            # Archivo USD cuando se está conciliando MXN, etc.
+            return pd.DataFrame()
+
         work = pd.DataFrame()
         work["Account code"] = df[account_code_col] if account_code_col else ""
         work["Account ID"] = df[account_id_col] if account_id_col else ""
         work["Transaction date"] = df[date_col]
         work["Description"] = df[description_col]
         work["Complementary info"] = df[complementary_col] if complementary_col else ""
+        work["Currency"] = detected_currency or currency_filter
+        work["Account bank"] = account_bank or ""
 
         if credit_col:
             work["Credit"] = clean_amount(df[credit_col])
         else:
             work["Credit"] = clean_amount(df[amount_col])
 
-        work["Debit"] = clean_amount(df[debit_col]) if debit_col else 0
+        if debit_col:
+            work["Debit"] = clean_amount(df[debit_col])
+        else:
+            work["Debit"] = 0
 
         work = work[
-            ~work["Description"].isin([
+            ~work["Description"].astype(str).isin([
                 "Opening balance",
                 "Closing balance",
                 "Description"
             ])
         ]
 
-        work["Transaction date"] = pd.to_datetime(
-            work["Transaction date"],
-            errors="coerce"
-        )
+        work["Transaction date"] = pd.to_datetime(work["Transaction date"], errors="coerce")
         work = work[work["Transaction date"].notna()]
 
         work["Text to match"] = (
@@ -413,18 +517,27 @@ def parse_kyriba(file_bytes, file_name, entity, manual_mapping_text):
             + work["Complementary info"].astype(str)
         )
 
+        # Solo créditos positivos para comparar depósitos/entradas
+        work = work[work["Credit"] > 0].copy()
+
+        # Excluir intereses/saldos si entran como crédito muy chico o balance
+        exclude_patterns = [
+            "OPENING BALANCE",
+            "CLOSING BALANCE",
+            "ABO POR INTERESES",
+            "INTERESES DEL PERIODO",
+        ]
+        mask_excl = work["Text to match"].astype(str).str.upper().apply(
+            lambda x: any(p in x for p in exclude_patterns)
+        )
+        work = work[~mask_excl].copy()
+
+        # Processor: manual mapping > regla > banco de cuenta
         work["Processor"] = work.apply(
-            lambda r: get_processor_mx(
-                text_to_match=r["Text to match"],
-                account_id=r["Account ID"],
-                account_code=r["Account code"],
-                entity=entity,
-                manual_map=manual_map,
-            ),
+            lambda r: infer_processor_from_kyriba_row(r, manual_mapping, account_bank=account_bank if use_fallback else None),
             axis=1,
         )
 
-        work = work[work["Credit"] > 0].copy()
         work["Day"] = work["Transaction date"].dt.strftime("%d/%m/%Y")
         work["Source file"] = file_name
 
@@ -440,12 +553,13 @@ def parse_kyriba(file_bytes, file_name, entity, manual_mapping_text):
 # ─────────────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
-def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, entity):
+def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, col_agent, entity_name):
     try:
         import io
 
         is_csv = file_name.lower().endswith(".csv")
         header_row = find_header_row(file_bytes, file_name)
+
         if header_row is None:
             header_row = 0
 
@@ -459,39 +573,16 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, ent
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(how="all")
 
-        # Filter by legal entity / collection agent if available.
-        collection_agent_col = find_column(df, [
-            "Collection Agent",
-            "Legal Entity",
-            "Entity",
-            "Company",
-            "Merchant",
-            "Agent"
-        ])
-
-        if collection_agent_col:
-            expected_agent = expected_collection_agent(entity)
-            before = len(df)
-            df = df[
-                df[collection_agent_col]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                .eq(expected_agent.lower())
-            ].copy()
-            after = len(df)
-            st.info(f"{file_name}: filtrado por {collection_agent_col} = {expected_agent}. Filas: {after}/{before}")
-
         if col_date:
             date_col = col_date if col_date in df.columns else find_column(df, [col_date])
         else:
             date_col = find_column(df, [
-                "Accounting Date",
                 "Payment Date",
                 "Approved Date",
                 "Payins Creation Date",
                 "Creation Date",
                 "Created Date",
+                "Accounting Date",
                 "Date",
                 "Day",
                 "Fecha"
@@ -528,6 +619,18 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, ent
                 "Gateway"
             ])
 
+        if col_agent:
+            agent_col = col_agent if col_agent in df.columns else find_column(df, [col_agent])
+        else:
+            agent_col = find_column(df, [
+                "Collection Agent",
+                "Agent",
+                "Legal Entity",
+                "Entity",
+                "Company",
+                "Merchant"
+            ])
+
         missing = []
         if not date_col:
             missing.append("Fecha")
@@ -546,16 +649,19 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, ent
         work["Amount"] = clean_amount(df[amount_col])
         work["Processor"] = df[processor_col].apply(normalize_processor)
 
+        if agent_col:
+            work["Collection Agent"] = df[agent_col].astype(str).str.strip()
+            # Si el archivo trae entidad, filtrar según entidad elegida
+            expected_agent = entity_name
+            work = work[work["Collection Agent"].str.lower() == expected_agent.lower()].copy()
+        else:
+            work["Collection Agent"] = ""
+
         code_col = find_column(df, ["Code", "Payment Method Code", "Payment Method", "PM Code"])
         work["Payment Method Code"] = df[code_col] if code_col else ""
 
         country_col = find_column(df, ["Country", "Country Transaction", "Pais", "País"])
         work["Country"] = df[country_col] if country_col else ""
-
-        if collection_agent_col:
-            work["Collection Agent"] = df[collection_agent_col]
-        else:
-            work["Collection Agent"] = ""
 
         work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
         work = work[work["Date"].notna()]
@@ -576,7 +682,7 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, ent
 # EXPORT
 # ─────────────────────────────────────────────────────────────
 
-def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
+def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df, unmapped_df, excluded_df):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -584,6 +690,8 @@ def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df):
         detail_df.to_excel(writer, index=False, sheet_name="Detalle")
         kyriba_raw_df.to_excel(writer, index=False, sheet_name="Kyriba combinado")
         payins_raw_df.to_excel(writer, index=False, sheet_name="Payins combinado")
+        unmapped_df.to_excel(writer, index=False, sheet_name="Kyriba sin processor")
+        excluded_df.to_excel(writer, index=False, sheet_name="Payins excluidos")
 
     output.seek(0)
     return output
@@ -616,43 +724,37 @@ with col2:
 
 if kyriba_files and payins_files:
     kyriba_dfs = []
+    skipped_kyriba = []
 
     with st.spinner("Leyendo archivos Kyriba..."):
         for file in kyriba_files:
             file_bytes = file.read()
-            temp_df = parse_kyriba(file_bytes, file.name, entity, manual_mapping_text)
+            temp_df = parse_kyriba(
+                file_bytes,
+                file.name,
+                entity,
+                manual_mapping_text,
+                currency_filter,
+                use_account_fallback
+            )
 
             if not temp_df.empty:
                 kyriba_dfs.append(temp_df)
+            else:
+                skipped_kyriba.append(file.name)
 
     if not kyriba_dfs:
-        st.error("No pude leer ningún archivo Kyriba válido.")
+        st.error("No pude leer ningún archivo Kyriba válido para la moneda seleccionada.")
+        if skipped_kyriba:
+            st.write("Archivos omitidos:", skipped_kyriba)
         st.stop()
 
     kyriba_df = pd.concat(kyriba_dfs, ignore_index=True)
     st.success(f"Archivos Kyriba combinados: {len(kyriba_dfs)}")
 
-    with st.expander("🔎 Movimientos Kyriba no identificados"):
-        unmapped = kyriba_df[kyriba_df["Processor"].isna()].copy()
-        st.write(f"Movimientos no identificados: {len(unmapped)}")
-        if not unmapped.empty:
-            st.dataframe(
-                unmapped[
-                    [
-                        "Transaction date",
-                        "Account code",
-                        "Account ID",
-                        "Description",
-                        "Complementary info",
-                        "Credit",
-                        "Source file",
-                    ]
-                ].sort_values("Credit", ascending=False),
-                use_container_width=True,
-                hide_index=True
-            )
-
-    kyriba_df = kyriba_df[kyriba_df["Processor"].notna()].copy()
+    if skipped_kyriba:
+        with st.expander("Archivos Kyriba omitidos"):
+            st.write(skipped_kyriba)
 
     payins_dfs = []
 
@@ -665,6 +767,7 @@ if kyriba_files and payins_files:
                 col_date,
                 col_amount,
                 col_processor,
+                col_agent,
                 entity
             )
 
@@ -678,14 +781,34 @@ if kyriba_files and payins_files:
     payins_df = pd.concat(payins_dfs, ignore_index=True)
     st.success(f"Archivos Payins combinados: {len(payins_dfs)}")
 
-    # ── DEBUG PROCESSORS ─────────────────────────────────────
+    # Debug e identificación
+    unmapped_kyriba = kyriba_df[kyriba_df["Processor"].isna()].copy()
+    kyriba_mapped_df = kyriba_df[kyriba_df["Processor"].notna()].copy()
 
-    with st.expander("🔎 Debug processors detectados"):
-        st.write("Processors Kyriba:", sorted(kyriba_df["Processor"].dropna().unique()))
+    with st.expander("🔎 Debug processors y cuentas detectadas"):
+        st.write("Processors Kyriba:", sorted(kyriba_mapped_df["Processor"].dropna().unique()))
         st.write("Processors Payins:", sorted(payins_df["Processor"].dropna().unique()))
+        st.write("Cuentas Kyriba:", sorted(kyriba_df["Account code"].dropna().unique()))
+        st.write("Bancos de cuenta:", sorted(kyriba_df["Account bank"].dropna().unique()))
+        st.write("Monedas Kyriba:", sorted(kyriba_df["Currency"].dropna().unique()))
+        if not unmapped_kyriba.empty:
+            st.warning(f"Movimientos Kyriba sin processor: {len(unmapped_kyriba)}")
+            st.dataframe(
+                unmapped_kyriba[[
+                    "Transaction date", "Account code", "Account ID", "Account bank",
+                    "Currency", "Description", "Complementary info", "Credit", "Source file"
+                ]].head(300),
+                use_container_width=True,
+                hide_index=True
+            )
 
-    # ── FILTRO DE FECHAS COMÚN ─────────────────────────────
+    if kyriba_mapped_df.empty:
+        st.error("Kyriba se leyó, pero ningún movimiento quedó con Processor. Revisá el mapping manual de cuentas.")
+        st.stop()
 
+    kyriba_df = kyriba_mapped_df
+
+    # Fechas comunes
     kyriba_min = kyriba_df["Transaction date"].min().date()
     kyriba_max = kyriba_df["Transaction date"].max().date()
 
@@ -728,16 +851,17 @@ if kyriba_files and payins_files:
 
     st.info(f"Comparando únicamente: {start_date} al {end_date}")
 
-    # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
-
+    # Filtrar payins solo a processors existentes en Kyriba
     kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
     payins_processors_original = set(payins_df["Processor"].dropna().unique())
 
-    payins_excluded = sorted(payins_processors_original - kyriba_processors)
+    payins_excluded_processors = sorted(payins_processors_original - kyriba_processors)
+    payins_excluded_df = payins_df[~payins_df["Processor"].isin(kyriba_processors)].copy()
 
     with st.expander("🔎 Procesadores Payins excluidos por no existir en Kyriba"):
-        if payins_excluded:
-            st.write(payins_excluded)
+        if payins_excluded_processors:
+            st.write(payins_excluded_processors)
+            st.dataframe(payins_excluded_df, use_container_width=True, hide_index=True)
         else:
             st.write("No se excluyó ningún procesador.")
 
@@ -761,14 +885,14 @@ if kyriba_files and payins_files:
             kyriba_filtered
             .groupby(["Processor", "Day"], as_index=False)["Credit"]
             .sum()
-            .rename(columns={"Credit": "Banco MXN"})
+            .rename(columns={"Credit": "Banco"})
         )
 
         payins_grouped = (
             payins_filtered
             .groupby(["Processor", "Day"], as_index=False)["Amount"]
             .sum()
-            .rename(columns={"Amount": "Payins estimados MXN"})
+            .rename(columns={"Amount": "Payins estimados"})
         )
 
         detail = pd.merge(
@@ -778,21 +902,21 @@ if kyriba_files and payins_files:
             how="outer"
         ).fillna(0)
 
-        detail["Diferencia MXN"] = detail["Banco MXN"] - detail["Payins estimados MXN"]
+        detail["Diferencia"] = detail["Banco"] - detail["Payins estimados"]
 
         detail["Dif %"] = detail.apply(
-            lambda r: (r["Diferencia MXN"] / r["Payins estimados MXN"] * 100)
-            if r["Payins estimados MXN"] != 0 else 0,
+            lambda r: (r["Diferencia"] / r["Payins estimados"] * 100)
+            if r["Payins estimados"] != 0 else 0,
             axis=1
         )
 
         detail["Estado"] = detail.apply(
             lambda r: "⚠️ Sin dato Payins"
-            if r["Payins estimados MXN"] == 0
+            if r["Payins estimados"] == 0
             else (
                 "✅ OK"
                 if abs(r["Dif %"]) <= tolerance
-                else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")
+                else ("🔴 Banco menor" if r["Diferencia"] < 0 else "🟡 Banco mayor")
             ),
             axis=1
         )
@@ -801,40 +925,40 @@ if kyriba_files and payins_files:
             detail
             .groupby("Processor", as_index=False)
             .agg({
-                "Banco MXN": "sum",
-                "Payins estimados MXN": "sum",
-                "Diferencia MXN": "sum"
+                "Banco": "sum",
+                "Payins estimados": "sum",
+                "Diferencia": "sum"
             })
         )
 
         summary["Dif %"] = summary.apply(
-            lambda r: (r["Diferencia MXN"] / r["Payins estimados MXN"] * 100)
-            if r["Payins estimados MXN"] != 0 else 0,
+            lambda r: (r["Diferencia"] / r["Payins estimados"] * 100)
+            if r["Payins estimados"] != 0 else 0,
             axis=1
         )
 
         summary["Estado"] = summary.apply(
             lambda r: "⚠️ Sin dato Payins"
-            if r["Payins estimados MXN"] == 0
+            if r["Payins estimados"] == 0
             else (
                 "✅ OK"
                 if abs(r["Dif %"]) <= tolerance
-                else ("🔴 Banco menor" if r["Diferencia MXN"] < 0 else "🟡 Banco mayor")
+                else ("🔴 Banco menor" if r["Diferencia"] < 0 else "🟡 Banco mayor")
             ),
             axis=1
         )
 
         st.subheader("📈 KPIs")
 
-        total_banco = summary["Banco MXN"].sum()
-        total_payins = summary["Payins estimados MXN"].sum()
+        total_banco = summary["Banco"].sum()
+        total_payins = summary["Payins estimados"].sum()
         total_diff = total_banco - total_payins
         total_pct = total_diff / total_payins * 100 if total_payins else 0
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Banco MXN", f"{total_banco:,.0f}")
-        k2.metric("Payins estimados MXN", f"{total_payins:,.0f}")
-        k3.metric("Diferencia MXN", f"{total_diff:,.0f}")
+        k1.metric(f"Banco {currency_filter}", f"{total_banco:,.0f}")
+        k2.metric(f"Payins estimados", f"{total_payins:,.0f}")
+        k3.metric("Diferencia", f"{total_diff:,.0f}")
         k4.metric("Dif. %", f"{total_pct:.1f}%")
 
         st.subheader("📊 Resumen por procesador")
@@ -849,7 +973,7 @@ if kyriba_files and payins_files:
         with st.expander("Ver Payins combinados"):
             st.dataframe(payins_df, use_container_width=True, hide_index=True)
 
-        excel_file = build_excel(summary, detail, kyriba_df, payins_df)
+        excel_file = build_excel(summary, detail, kyriba_df, payins_df, unmapped_kyriba, payins_excluded_df)
 
         st.download_button(
             label="⬇️ Descargar Excel conciliación",
