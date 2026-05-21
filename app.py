@@ -286,8 +286,6 @@ def normalize_processor(name):
 @st.cache_data(show_spinner=False)
 @st.cache_data(show_spinner=False)
 def parse_kyriba(file_bytes, file_name, entity):
-    try:
-        import io
 
         is_csv = file_name.lower().endswith(".csv")
         header_row = find_header_row(file_bytes, file_name)
