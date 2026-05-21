@@ -117,6 +117,14 @@ def normalize_text(value):
     return str(value).strip().lower().replace("_", " ").replace("-", " ")
 
 
+def normalize_account_value(value):
+    clean = str(value).strip()
+    if clean.endswith(".0"):
+        clean = clean[:-2]
+    clean = clean.replace(" ", "")
+    return clean
+
+
 def find_column(df, possible_names):
     normalized_cols = {normalize_text(c): c for c in df.columns}
 
@@ -205,13 +213,22 @@ def get_processor_mx(text_to_match, account_id=None, account_code=None, entity_n
         return None
 
     text_clean = text_to_match.upper()
-    account_id_clean = str(account_id).strip()
-    account_code_clean = str(account_code).strip()
+    account_id_clean = normalize_account_value(account_id)
+    account_code_clean = normalize_account_value(account_code).upper()
 
     for keyword, processor, expected_account_id, expected_account_code in get_rules(entity_name):
-        if keyword.upper() in text_clean:
-            if account_id_clean == expected_account_id or account_code_clean == expected_account_code:
-                return processor
+        keyword_clean = str(keyword).replace('"', '').strip().upper()
+        expected_account_id = normalize_account_value(expected_account_id)
+        expected_account_code = normalize_account_value(expected_account_code).upper()
+
+        keyword_matches = keyword_clean and keyword_clean in text_clean
+        account_matches = (
+            expected_account_id in account_id_clean
+            or expected_account_code in account_code_clean
+        )
+
+        if keyword_matches and account_matches:
+            return processor
 
     return None
 
@@ -386,7 +403,8 @@ def parse_kyriba(file_bytes, file_name, entity_name):
             axis=1,
         )
 
-        work = work[work["Processor"].notna()].copy()
+        # Conservamos también movimientos no identificados para diagnóstico.
+        # Se filtran más abajo, justo antes del análisis.
         work = work[work["Credit"] > 0].copy()
 
         work["Day"] = work["Transaction date"].dt.strftime("%d/%m/%Y")
@@ -574,6 +592,21 @@ if kyriba_files and payins_files:
     kyriba_df = pd.concat(kyriba_dfs, ignore_index=True)
     st.success(f"Archivos Kyriba combinados: {len(kyriba_dfs)}")
 
+    with st.expander("🔎 Movimientos Kyriba no identificados"):
+        unmapped = kyriba_df[kyriba_df["Processor"].isna()].copy()
+        st.write(f"Movimientos no identificados: {len(unmapped)}")
+        if not unmapped.empty:
+            cols = [
+                "Transaction date", "Account code", "Account ID",
+                "Description", "Complementary info", "Credit", "Source file"
+            ]
+            existing_cols = [c for c in cols if c in unmapped.columns]
+            st.dataframe(
+                unmapped[existing_cols].sort_values("Credit", ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+
     payins_dfs = []
 
     with st.spinner("Leyendo archivos Payins..."):
@@ -640,6 +673,9 @@ if kyriba_files and payins_files:
     ]
 
     st.info(f"Comparando únicamente: {start_date} al {end_date}")
+
+    # Para el análisis usamos solo movimientos Kyriba identificados.
+    kyriba_df = kyriba_df[kyriba_df["Processor"].notna()].copy()
 
     # ── FILTRAR PAYINS SOLO A PROCESADORES QUE EXISTEN EN KYRIBA ──
 
@@ -773,4 +809,3 @@ if kyriba_files and payins_files:
 
 else:
     st.info("Subí uno o más archivos Kyriba y uno o más archivos de estimaciones Payins.")
-
