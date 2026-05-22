@@ -507,8 +507,28 @@ def parse_kyriba(file_bytes, file_name, selected_entity, manual_mapping_text="")
 
         work["Processor"] = work.apply(assign_processor, axis=1)
 
+        # Asegurar columna canónica de fecha antes de cualquier filtro
+        if "Transaction date" not in work.columns:
+            work["Transaction date"] = df[date_col]
+
         # Solo ingresos positivos
         work = work[work["Credit"] > 0].copy()
+
+        # Si quedó vacío, devolvemos estructura válida para no romper el main
+        if work.empty:
+            return pd.DataFrame(columns=[
+                "Account code",
+                "Account ID",
+                "Transaction date",
+                "Description",
+                "Complementary info",
+                "Credit",
+                "Debit",
+                "Text to match",
+                "Processor",
+                "Day",
+                "Source file",
+            ])
 
         # Excluir movimientos internos / treasury
         exclude_keywords = [
@@ -539,6 +559,44 @@ def parse_kyriba(file_bytes, file_name, selected_entity, manual_mapping_text="")
             )
         ].copy()
 
+        # Si el filtro treasury dejó todo vacío, devolvemos estructura válida
+        if work.empty:
+            return pd.DataFrame(columns=[
+                "Account code",
+                "Account ID",
+                "Transaction date",
+                "Description",
+                "Complementary info",
+                "Credit",
+                "Debit",
+                "Text to match",
+                "Processor",
+                "Day",
+                "Source file",
+            ])
+
+        # Reaseguro final de fecha
+        if "Transaction date" not in work.columns:
+            work["Transaction date"] = df[date_col]
+
+        work["Transaction date"] = pd.to_datetime(work["Transaction date"], errors="coerce")
+        work = work[work["Transaction date"].notna()].copy()
+
+        if work.empty:
+            return pd.DataFrame(columns=[
+                "Account code",
+                "Account ID",
+                "Transaction date",
+                "Description",
+                "Complementary info",
+                "Credit",
+                "Debit",
+                "Text to match",
+                "Processor",
+                "Day",
+                "Source file",
+            ])
+
         work["Day"] = work["Transaction date"].dt.strftime("%d/%m/%Y")
         work["Source file"] = file_name
 
@@ -546,7 +604,23 @@ def parse_kyriba(file_bytes, file_name, selected_entity, manual_mapping_text="")
 
     except Exception as e:
         st.error(f"Error leyendo Kyriba {file_name}: {e}")
-        return pd.DataFrame()
+        try:
+            st.write("Columnas detectadas en Kyriba:", list(df.columns))
+        except Exception:
+            pass
+        return pd.DataFrame(columns=[
+            "Account code",
+            "Account ID",
+            "Transaction date",
+            "Description",
+            "Complementary info",
+            "Credit",
+            "Debit",
+            "Text to match",
+            "Processor",
+            "Day",
+            "Source file",
+        ])
 
 
 # PARSE PAYINS
@@ -741,6 +815,19 @@ if kyriba_files and payins_files:
         st.stop()
 
     kyriba_df = pd.concat(kyriba_dfs, ignore_index=True)
+
+    if "Transaction date" not in kyriba_df.columns:
+        st.error("No se encontró la columna Transaction date en Kyriba después de combinar archivos.")
+        st.write("Columnas Kyriba combinadas:", list(kyriba_df.columns))
+        st.stop()
+
+    kyriba_df["Transaction date"] = pd.to_datetime(kyriba_df["Transaction date"], errors="coerce")
+    kyriba_df = kyriba_df[kyriba_df["Transaction date"].notna()].copy()
+
+    if kyriba_df.empty:
+        st.error("Kyriba quedó sin movimientos válidos después de leer fechas y filtros.")
+        st.stop()
+
     st.success(f"Archivos Kyriba combinados: {len(kyriba_dfs)}")
 
     payins_dfs = []
