@@ -240,7 +240,7 @@ def read_table_with_detected_header(file_bytes, file_name, dtype=None):
     else:
         df = pd.read_excel(buf, header=header_row, dtype=dtype)
 
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [str(c).replace("\\n", " ").strip() for c in df.columns]
     df = df.dropna(how="all")
     df = df.loc[:, ~df.columns.astype(str).str.startswith("Unnamed")]
     return df
@@ -372,6 +372,9 @@ def normalize_processor(name):
 
         # KUSHKI
         "kushki": "Kushki",
+        "kushki mexico": "Kushki",
+        "kushki mx": "Kushki",
+        "dlocal technologies": "Dlocal Technologies",
     }
 
     return processor_map.get(clean, original)
@@ -387,6 +390,7 @@ def guess_processor_from_account(account_code):
     account_map = {
         # Estos se pueden ajustar en la app con el mapping manual
         "AA368": "Kushki",
+        "AA369": "Kushki",
         "AA639": "Banorte",
         "AA640": "EVO MPGs",
         "AB072": "Openpay",
@@ -600,9 +604,21 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, sel
         if collection_agent_col:
             work["Collection Agent"] = df[collection_agent_col].astype(str).str.strip()
 
-            target_agent = "Dlocal Mexico" if selected_entity == "Dlocal Mexico" else "Demerge Mexico"
+            if selected_entity == "Dlocal Mexico":
+                valid_agents = [
+                    "dlocal mexico",
+                    "dlocal technologies",
+                ]
+            else:
+                valid_agents = [
+                    "demerge mexico",
+                ]
+
             work = work[
-                work["Collection Agent"].str.lower().str.contains(target_agent.lower(), na=False)
+                work["Collection Agent"]
+                .astype(str)
+                .str.lower()
+                .apply(lambda x: any(agent in x for agent in valid_agents))
             ].copy()
         else:
             work["Collection Agent"] = ""
@@ -638,7 +654,7 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, sel
 # EXPORT
 # ─────────────────────────────────────────────────────────────
 
-def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df, unmapped_kyriba_df):
+def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df, unmapped_kyriba_df, no_match_df):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -647,6 +663,7 @@ def build_excel(summary_df, detail_df, kyriba_raw_df, payins_raw_df, unmapped_ky
         kyriba_raw_df.to_excel(writer, index=False, sheet_name="Kyriba combinado")
         payins_raw_df.to_excel(writer, index=False, sheet_name="Payins combinado")
         unmapped_kyriba_df.to_excel(writer, index=False, sheet_name="Kyriba no mapeado")
+        no_match_df.to_excel(writer, index=False, sheet_name="No conciliados")
 
     output.seek(0)
     return output
@@ -767,20 +784,140 @@ if kyriba_files and payins_files:
 
     st.info(f"Comparando únicamente: {start_date} al {end_date}")
 
-  # ── USAR TODOS LOS PROCESADORES DE KYRIBA Y PAYINS ──
+    # ── DEBUG PROCESADORES ─────────────────────────────
 
-kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
-payins_processors = set(payins_df["Processor"].dropna().unique())
+    kyriba_processors = set(kyriba_df["Processor"].dropna().unique())
+    payins_processors_original = set(payins_df["Processor"].dropna().unique())
 
-processors = sorted(kyriba_processors | payins_processors)
+    missing_in_kyriba = sorted(payins_processors_original - kyriba_processors)
+    missing_in_payins = sorted(kyriba_processors - payins_processors_original)
 
-with st.expander("🔎 Debug processors finales"):
-    st.write("Processors Kyriba:", sorted(kyriba_processors))
-    st.write("Processors Payins:", sorted(payins_processors))
-    st.write("Processors usados:", processors)
+    with st.expander("🔎 Debug procesadores"):
+        st.write("Solo en Payins:", missing_in_kyriba)
+        st.write("Solo en Kyriba:", missing_in_payins)
 
-selected_processors = st.multiselect(
-    "Procesadores a analizar",
-    options=processors,
-    default=processors,
-)
+    processors = sorted(
+        set(kyriba_df["Processor"].dropna().unique())
+        | set(payins_df["Processor"].dropna().unique())
+    )
+
+    selected_processors = st.multiselect(
+        "Procesadores a analizar",
+        options=processors,
+        default=processors,
+    )
+
+    if st.button("▶ Analizar conciliación", type="primary"):
+        kyriba_filtered = kyriba_df[kyriba_df["Processor"].isin(selected_processors)]
+        payins_filtered = payins_df[payins_df["Processor"].isin(selected_processors)]
+
+        banco_grouped = (
+            kyriba_filtered
+            .groupby(["Processor", "Day"], as_index=False)["Credit"]
+            .sum()
+            .rename(columns={"Credit": "Banco"})
+        )
+
+        payins_grouped = (
+            payins_filtered
+            .groupby(["Processor", "Day"], as_index=False)["Amount"]
+            .sum()
+            .rename(columns={"Amount": "Payins estimados"})
+        )
+
+        detail = pd.merge(
+            banco_grouped,
+            payins_grouped,
+            on=["Processor", "Day"],
+            how="outer",
+        ).fillna(0)
+
+        detail["Diferencia"] = detail["Banco"] - detail["Payins estimados"]
+
+        detail["Dif %"] = detail.apply(
+            lambda r: (r["Diferencia"] / r["Payins estimados"] * 100)
+            if r["Payins estimados"] != 0
+            else 0,
+            axis=1,
+        )
+
+        detail["Estado"] = detail.apply(
+            lambda r: "⚠️ Sin dato Payins"
+            if r["Payins estimados"] == 0
+            else (
+                "✅ OK"
+                if abs(r["Dif %"]) <= tolerance
+                else ("🔴 Banco menor" if r["Diferencia"] < 0 else "🟡 Banco mayor")
+            ),
+            axis=1,
+        )
+
+        summary = (
+            detail
+            .groupby("Processor", as_index=False)
+            .agg({
+                "Banco": "sum",
+                "Payins estimados": "sum",
+                "Diferencia": "sum",
+            })
+        )
+
+        summary["Dif %"] = summary.apply(
+            lambda r: (r["Diferencia"] / r["Payins estimados"] * 100)
+            if r["Payins estimados"] != 0
+            else 0,
+            axis=1,
+        )
+
+        summary["Estado"] = summary.apply(
+            lambda r: "⚠️ Sin dato Payins"
+            if r["Payins estimados"] == 0
+            else (
+                "✅ OK"
+                if abs(r["Dif %"]) <= tolerance
+                else ("🔴 Banco menor" if r["Diferencia"] < 0 else "🟡 Banco mayor")
+            ),
+            axis=1,
+        )
+
+        st.subheader("📈 KPIs")
+
+        total_banco = summary["Banco"].sum()
+        total_payins = summary["Payins estimados"].sum()
+        total_diff = total_banco - total_payins
+        total_pct = total_diff / total_payins * 100 if total_payins else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Banco", f"{total_banco:,.0f}")
+        k2.metric("Payins estimados", f"{total_payins:,.0f}")
+        k3.metric("Diferencia", f"{total_diff:,.0f}")
+        k4.metric("Dif. %", f"{total_pct:.1f}%")
+
+        st.subheader("📊 Resumen por procesador")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        st.subheader("📅 Detalle por día")
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+
+        with st.expander("Ver Kyriba combinado"):
+            st.dataframe(kyriba_df, use_container_width=True, hide_index=True)
+
+        with st.expander("Ver Payins combinados"):
+            st.dataframe(payins_df, use_container_width=True, hide_index=True)
+
+        no_match = detail[(detail["Estado"] != "✅ OK")].copy()
+
+        with st.expander("Ver Kyriba no mapeado"):
+            st.dataframe(unmapped_kyriba, use_container_width=True, hide_index=True)
+
+        excel_file = build_excel(summary, detail, kyriba_df, payins_df, unmapped_kyriba, no_match)
+
+        st.download_button(
+            label="⬇️ Descargar Excel conciliación",
+            data=excel_file,
+            file_name=f"check_payins_mx_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+else:
+    st.info("Subí uno o más archivos Kyriba y uno o más archivos de estimaciones Payins.")
