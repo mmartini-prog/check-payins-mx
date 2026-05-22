@@ -507,37 +507,48 @@ def parse_kyriba(file_bytes, file_name, selected_entity, manual_mapping_text="")
 
         work["Processor"] = work.apply(assign_processor, axis=1)
 
-       # Solo ingresos positivos
-work = work[work["Credit"] > 0].copy()
+        # Solo ingresos positivos
+        work = work[work["Credit"] > 0].copy()
 
-# Excluir movimientos internos / treasury
-exclude_keywords = [
-    "TRASPASO",
-    "TRANSFER",
-    "SPEI ENVIADO",
-    "SWEEP",
-    "BARRIDO",
-    "INTERCOMPANY",
-    "INTERNAL",
-    "TOPUP",
-    "FUNDING",
-    "CASH POOL",
-    "TREASURY",
-    "SALDO",
-    "COMISION",
-    "FEE",
-    "IVA",
-    "IMPUESTO",
-]
+        # Excluir movimientos internos / treasury
+        exclude_keywords = [
+            "TRASPASO",
+            "TRANSFER",
+            "SPEI ENVIADO",
+            "SWEEP",
+            "BARRIDO",
+            "INTERCOMPANY",
+            "INTERNAL",
+            "TOPUP",
+            "FUNDING",
+            "CASH POOL",
+            "TREASURY",
+            "SALDO",
+            "COMISION",
+            "FEE",
+            "IVA",
+            "IMPUESTO",
+        ]
 
-work = work[
-    ~work["Text to match"]
-    .astype(str)
-    .str.upper()
-    .apply(
-        lambda x: any(word in x for word in exclude_keywords)
-    )
-].copy()
+        work = work[
+            ~work["Text to match"]
+            .astype(str)
+            .str.upper()
+            .apply(
+                lambda x: any(word in x for word in exclude_keywords)
+            )
+        ].copy()
+
+        work["Day"] = work["Transaction date"].dt.strftime("%d/%m/%Y")
+        work["Source file"] = file_name
+
+        return work
+
+    except Exception as e:
+        st.error(f"Error leyendo Kyriba {file_name}: {e}")
+        return pd.DataFrame()
+
+
 # PARSE PAYINS
 # ─────────────────────────────────────────────────────────────
 
