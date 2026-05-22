@@ -125,6 +125,8 @@ def get_rules(selected_entity):
 
 
 def normalize_text(value):
+    if pd.isna(value):
+        return ""
     return str(value).strip().lower().replace("_", " ").replace("-", " ")
 
 
@@ -614,11 +616,12 @@ def parse_payins(file_bytes, file_name, col_date, col_amount, col_processor, sel
                     "demerge mexico",
                 ]
 
+            def matches_valid_agent(value):
+                text = "" if pd.isna(value) else str(value).strip().lower()
+                return any(str(agent).lower() in text for agent in valid_agents)
+
             work = work[
-                work["Collection Agent"]
-                .astype(str)
-                .str.lower()
-                .apply(lambda x: any(agent in x for agent in valid_agents))
+                work["Collection Agent"].apply(matches_valid_agent)
             ].copy()
         else:
             work["Collection Agent"] = ""
